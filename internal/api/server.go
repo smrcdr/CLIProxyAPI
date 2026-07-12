@@ -508,6 +508,7 @@ func (s *Server) setupRoutes() {
 	s.engine.HEAD("/healthz", healthzHandler)
 
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
+	s.engine.GET("/smart-management.html", s.serveSmartManagementPage)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
 	claudeCodeHandlers := claude.NewClaudeCodeAPIHandler(s.handlers)
@@ -731,6 +732,12 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/api-keys", s.mgmt.PatchAPIKeys)
 		mgmt.DELETE("/api-keys", s.mgmt.DeleteAPIKeys)
 		mgmt.GET("/api-key-usage", s.mgmt.GetAPIKeyUsage)
+		mgmt.GET("/smartapi/overview", s.mgmt.GetSmartAPIOverview)
+		mgmt.GET("/smartapi/keys", s.mgmt.GetSmartAPIKeys)
+		mgmt.GET("/smartapi/keys/:id/reveal", s.mgmt.RevealSmartAPIKey)
+		mgmt.POST("/smartapi/keys", s.mgmt.PostSmartAPIKey)
+		mgmt.GET("/smartapi/settings", s.mgmt.GetSmartAPISettings)
+		mgmt.PUT("/smartapi/settings", s.mgmt.PutSmartAPISettings)
 		mgmt.GET("/usage-queue", s.mgmt.GetUsageQueue)
 
 		mgmt.GET("/gemini-api-key", s.mgmt.GetGeminiKeys)

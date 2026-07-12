@@ -781,7 +781,7 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	rawResponseHeaders := cloneHeader(resp.Headers)
 	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, PassthroughHeadersEnabled(h.Cfg))
 	body, responseHeaders := h.applyResponseInterceptors(ctx, responseProtocol, normalizedModel, originalRequestedModel, executedOpts, rawResponseHeaders, responseHeaders, executedOpts.OriginalRequest, executedReq.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID)
-	return body, responseHeaders, nil
+	return h.finalizeResponse(responseProtocol, body, responseHeaders)
 }
 
 // ExecuteCountWithAuthManager executes a non-streaming request via the core auth manager.
@@ -865,7 +865,7 @@ func (h *BaseAPIHandler) executeWithPluginExecutor(ctx context.Context, entryPro
 	rawResponseHeaders := cloneHeader(resp.Headers)
 	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, PassthroughHeadersEnabled(h.Cfg))
 	body, responseHeaders := h.applyResponseInterceptors(ctx, responseProtocol, modelName, originalRequestedModel, opts, rawResponseHeaders, responseHeaders, opts.OriginalRequest, req.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID)
-	return body, responseHeaders, nil
+	return h.finalizeResponse(responseProtocol, body, responseHeaders)
 }
 
 func (h *BaseAPIHandler) countWithPluginExecutor(ctx context.Context, handlerType, modelName, originalRequestedModel string, rawJSON []byte, alt, executorPluginID string, execOptions modelExecutionOptions) ([]byte, http.Header, *interfaces.ErrorMessage) {
@@ -1106,7 +1106,8 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 			}
 		}
 	}()
-	return dataChan, upstreamHeaders, errChan
+	dataChanOut, errChanOut := h.finalizeStream(ctx, responseProtocol, dataChan, errChan)
+	return dataChanOut, upstreamHeaders, errChanOut
 }
 
 func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string, allowImageModel bool) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
@@ -1414,7 +1415,8 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 			return
 		}
 	}()
-	return dataChan, upstreamHeaders, errChan
+	dataChanOut, errChanOut := h.finalizeStream(ctx, responseProtocol, dataChan, errChan)
+	return dataChanOut, upstreamHeaders, errChanOut
 }
 
 func validateSSEDataJSON(chunk []byte) error {

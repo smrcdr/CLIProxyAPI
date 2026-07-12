@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>SmartAPI · CLIProxy</title>
+  <style>
+    :root{--bg:#0d1117;--panel:#161b22;--panel2:#0d1117;--line:#30363d;--text:#e6edf3;--muted:#8b949e;--blue:#2f81f7;--green:#3fb950;--red:#f85149;--yellow:#d29922;--radius:6px;font:14px/1.45 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text)}button,input{font:inherit}button{cursor:pointer}.shell{max-width:1180px;margin:auto;padding:22px}.topbar{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:18px}.brand{display:flex;align-items:center;gap:10px}.mark{width:28px;height:28px;display:grid;place-items:center;border:1px solid var(--line);border-radius:6px;background:var(--panel);font:700 12px ui-monospace,SFMono-Regular,monospace}.brand h1{font-size:16px;margin:0}.brand p{margin:1px 0 0;color:var(--muted);font-size:12px}.actions{display:flex;gap:8px}.btn{border:1px solid var(--line);border-radius:6px;background:#21262d;color:var(--text);padding:6px 11px;font-weight:600}.btn:hover{border-color:#8b949e}.btn.primary{background:#238636;border-color:rgba(240,246,252,.1)}.btn.danger{color:#ff7b72}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}.metric,.panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius)}.metric{padding:13px 15px}.metric span{display:block;color:var(--muted);font-size:12px}.metric strong{display:block;font-size:24px;margin-top:3px;letter-spacing:-.03em}.layout{display:grid;grid-template-columns:minmax(0,1fr) 310px;gap:14px}.panel-header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px;border-bottom:1px solid var(--line)}.panel-header h2{font-size:14px;margin:0}.subtle{color:var(--muted);font-size:12px}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;text-align:left}th,td{padding:10px 14px;border-bottom:1px solid var(--line);white-space:nowrap}th{font-size:12px;color:var(--muted);font-weight:600;background:rgba(13,17,23,.45)}tbody tr:last-child td{border-bottom:0}.key{font:12px ui-monospace,SFMono-Regular,Consolas,monospace}.status{display:inline-flex;align-items:center;gap:6px}.dot{width:8px;height:8px;border-radius:50%;background:var(--muted)}.dot.ok{background:var(--green)}.dot.bad{background:var(--red)}.side{display:grid;gap:14px;align-content:start}.body{padding:14px}.field{display:grid;gap:6px;margin-bottom:10px}.field label{font-size:12px;font-weight:600}.input{width:100%;border:1px solid var(--line);border-radius:6px;background:var(--panel2);color:var(--text);padding:8px 10px;outline:none}.input:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(47,129,247,.18)}.row{display:flex;align-items:center;justify-content:space-between;gap:14px}.switch{position:relative;width:38px;height:22px;flex:none}.switch input{opacity:0;width:0;height:0}.slider{position:absolute;inset:0;border-radius:999px;background:#30363d;border:1px solid #484f58}.slider:before{content:"";position:absolute;width:16px;height:16px;left:2px;top:2px;border-radius:50%;background:#f0f6fc;transition:transform .12s}.switch input:checked+.slider{background:#238636}.switch input:checked+.slider:before{transform:translateX(16px)}.notice{margin:0 0 14px;padding:9px 11px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--muted)}.notice.error{border-color:rgba(248,81,73,.55);color:#ff7b72}.empty{padding:38px;text-align:center;color:var(--muted)}.login{min-height:100vh;display:grid;place-items:center;padding:20px}.login-card{width:min(390px,100%);background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:22px}.login-card h1{font-size:18px;margin:0 0 5px}.login-card p{color:var(--muted);margin:0 0 18px}.hidden{display:none!important}.cooldown{color:var(--yellow)}.reveal{padding:3px 7px;font-size:12px}@media(max-width:820px){.grid{grid-template-columns:repeat(2,1fr)}.layout{grid-template-columns:1fr}.shell{padding:14px}}@media(prefers-reduced-motion:reduce){*{transition:none!important}}
+  </style>
+</head>
+<body>
+  <section id="login" class="login">
+    <form id="loginForm" class="login-card">
+      <div class="brand" style="margin-bottom:16px"><div class="mark">S</div><div><h1>SmartAPI Management</h1><p style="margin:1px 0 0">Локальная панель CLIProxy</p></div></div>
+      <div class="field"><label for="managementKey">Management key</label><input id="managementKey" class="input" type="password" autocomplete="current-password" required autofocus></div>
+      <button class="btn primary" type="submit" style="width:100%">Войти</button>
+      <p id="loginError" class="notice error hidden" style="margin-top:12px;margin-bottom:0"></p>
+    </form>
+  </section>
+
+  <main id="app" class="shell hidden">
+    <header class="topbar">
+      <div class="brand"><div class="mark">S</div><div><h1>SmartAPI · CLIProxy</h1><p>OpenCode Go credentials · dev</p></div></div>
+      <div class="actions"><button id="refresh" class="btn" type="button">Обновить</button><button id="logout" class="btn danger" type="button">Выйти</button></div>
+    </header>
+    <p id="notice" class="notice hidden"></p>
+    <section class="grid" aria-label="Сводка">
+      <div class="metric"><span>Всего ключей</span><strong id="total">—</strong></div>
+      <div class="metric"><span>Доступно</span><strong id="available">—</strong></div>
+      <div class="metric"><span>Успешно</span><strong id="success">—</strong></div>
+      <div class="metric"><span>Ошибки</span><strong id="failed">—</strong></div>
+    </section>
+    <div class="layout">
+      <section class="panel">
+        <div class="panel-header"><div><h2>OpenCode Go ключи</h2><span id="updated" class="subtle">Загрузка…</span></div></div>
+        <div class="table-wrap"><table><thead><tr><th>Ключ</th><th>Статус</th><th>Success</th><th>Fail</th><th>Cooldown</th><th></th></tr></thead><tbody id="keyRows"></tbody></table><div id="empty" class="empty hidden">Подходящих ключей пока нет</div></div>
+      </section>
+      <aside class="side">
+        <section class="panel"><div class="panel-header"><h2>Reasoning</h2></div><div class="body"><div class="row"><div><strong>Скрывать reasoning</strong><div class="subtle">Chat, Responses и Messages</div></div><label class="switch"><input id="stripReasoning" type="checkbox"><span class="slider"></span></label></div></div></section>
+        <section class="panel"><div class="panel-header"><h2>Добавить ключ</h2></div><form id="addForm" class="body"><div class="field"><label for="newKey">OpenCode Go API key</label><input id="newKey" class="input key" type="password" placeholder="sk-…" autocomplete="off" required></div><button id="addButton" class="btn primary" type="submit">Добавить</button><p class="subtle">Модели, aliases, headers и routing будут скопированы из действующего шаблона.</p></form></section>
+      </aside>
+    </div>
+  </main>
+
+  <script>
+    const storageKey='smartapi.management-key';
+    const $=id=>document.getElementById(id);
+    let key=sessionStorage.getItem(storageKey)||'';
+    let timer=null;
+    async function api(path,options={}){const headers={...(options.headers||{}),Authorization:`Bearer ${key}`};if(options.body)headers['Content-Type']='application/json';const response=await fetch('/v0/management/smartapi'+path,{...options,headers,cache:'no-store'});let data={};try{data=await response.json()}catch{}if(!response.ok){const error=new Error(data.error||`HTTP ${response.status}`);error.status=response.status;throw error}return data}
+    function showNotice(message,error=false){const node=$('notice');node.textContent=message;node.classList.toggle('error',error);node.classList.toggle('hidden',!message)}
+    function login(){sessionStorage.setItem(storageKey,key);$('login').classList.add('hidden');$('app').classList.remove('hidden');refreshAll();timer=setInterval(refreshAll,5000)}
+    function logout(){clearInterval(timer);timer=null;sessionStorage.removeItem(storageKey);key='';$('app').classList.add('hidden');$('login').classList.remove('hidden');$('managementKey').value='';$('managementKey').focus()}
+    function statusLabel(item){if(item.available)return['Доступен','ok'];if(item.status==='error'||item.status==='disabled')return[item.status==='disabled'?'Отключён':'Ошибка','bad'];return[item.status||'Неизвестно','']}
+    function renderKeys(items){const rows=$('keyRows');rows.replaceChildren();$('empty').classList.toggle('hidden',items.length!==0);for(const item of items){const tr=document.createElement('tr');const label=statusLabel(item);const cooldown=item.cooldown_until?new Date(item.cooldown_until).toLocaleString('ru-RU'):'—';const values=[item.masked_key,label[0],String(item.success),String(item.failed),cooldown];values.forEach((value,index)=>{const td=document.createElement('td');td.textContent=value;if(index===0)td.className='key';if(index===1){td.textContent='';const status=document.createElement('span');status.className='status';const dot=document.createElement('i');dot.className='dot '+label[1];const text=document.createElement('span');text.textContent=value;status.append(dot,text);td.append(status)}if(index===4&&item.cooldown_until)td.className='cooldown';tr.append(td)});const action=document.createElement('td');const button=document.createElement('button');button.className='btn reveal';button.type='button';button.textContent='Показать';button.onclick=async()=>{try{button.disabled=true;const data=await api('/keys/'+encodeURIComponent(item.id)+'/reveal');tr.cells[0].textContent=data.api_key;button.textContent='Скрыть';button.onclick=()=>{tr.cells[0].textContent=item.masked_key;button.textContent='Показать';button.disabled=false}}catch(error){showNotice(error.message,true);button.disabled=false}};action.append(button);tr.append(action);rows.append(tr)}}
+    async function refreshAll(){try{const [overview,keys,settings]=await Promise.all([api('/overview'),api('/keys'),api('/settings')]);$('total').textContent=overview.total;$('available').textContent=overview.available;$('success').textContent=overview.success;$('failed').textContent=overview.failed;$('updated').textContent='Обновлено '+new Date(overview.updated_at).toLocaleTimeString('ru-RU');$('stripReasoning').checked=settings.strip_reasoning;renderKeys(keys.keys||[]);showNotice('')}catch(error){if(error.status===401){logout();$('loginError').textContent='Неверный management key';$('loginError').classList.remove('hidden')}else showNotice('Не удалось обновить данные: '+error.message,true)}}
+    $('loginForm').onsubmit=async event=>{event.preventDefault();key=$('managementKey').value.trim();$('loginError').classList.add('hidden');try{await api('/overview');login()}catch(error){$('loginError').textContent=error.status===401?'Неверный management key':error.message;$('loginError').classList.remove('hidden')}};
+    $('logout').onclick=logout;$('refresh').onclick=refreshAll;
+    $('stripReasoning').onchange=async event=>{const value=event.target.checked;event.target.disabled=true;try{await api('/settings',{method:'PUT',body:JSON.stringify({strip_reasoning:value})});showNotice('Настройка reasoning сохранена')}catch(error){event.target.checked=!value;showNotice(error.message,true)}finally{event.target.disabled=false}};
+    $('addForm').onsubmit=async event=>{event.preventDefault();const button=$('addButton');button.disabled=true;try{await api('/keys',{method:'POST',body:JSON.stringify({api_key:$('newKey').value.trim()})});$('newKey').value='';showNotice('Ключ добавлен и применён');await refreshAll()}catch(error){showNotice(error.message,true)}finally{button.disabled=false}};
+    if(key){login()}else{$('login').classList.remove('hidden')}
+  </script>
+</body>
+</html>
