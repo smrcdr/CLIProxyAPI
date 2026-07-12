@@ -47,7 +47,7 @@ services:
     ports:
       - "127.0.0.1:8323:8317"
     volumes:
-      - ./config.verify.yaml:/CLIProxyAPI/config.yaml
+      - ${VERIFY_CONFIG:-./config.verify.yaml}:/CLIProxyAPI/config.yaml
     tmpfs:
       - /root/.cli-proxy-api
       - /CLIProxyAPI/logs
