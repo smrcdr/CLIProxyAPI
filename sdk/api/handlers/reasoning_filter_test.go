@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -86,6 +87,20 @@ func TestReasoningStreamFilterResponsesDropsEventsAndRenumbers(t *testing.T) {
 	output := collectFilteredChunks(t, filter, chunks)
 	assertNotContains(t, output, "secret", `"type":"reasoning"`, "<thinking>")
 	assertContains(t, output, `"sequence_number":0`, `"sequence_number":1`, `"sequence_number":2`, `"reasoning_tokens":3`)
+}
+
+func TestReasoningStreamFilterResponsesAcceptsSplitUndelimitedEvent(t *testing.T) {
+	filter := newReasoningStreamFilter("openai-response")
+	first, err := filter.Write([]byte("event: response.output_text.delta"))
+	if err != nil || len(first) != 0 {
+		t.Fatalf("first chunk = %q, err = %v", first, err)
+	}
+	second, err := filter.Write([]byte(`data: {"type":"response.output_text.delta","sequence_number":9,"output_index":0,"content_index":0,"delta":"OK"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := bytes.Join(second, nil)
+	assertContains(t, output, "event: response.output_text.delta", `"sequence_number":0`, `"delta":"OK"`)
 }
 
 func TestReasoningStreamFilterMessagesDropsBlocksAndRenumbers(t *testing.T) {

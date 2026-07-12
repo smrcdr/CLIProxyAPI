@@ -226,6 +226,9 @@ func (f *reasoningStreamFilter) Write(chunk []byte) ([][]byte, error) {
 		}
 		return [][]byte{cleaned}, nil
 	}
+	if reasoningSSENeedsLineBreak(f.buffer, chunk) {
+		f.buffer = append(f.buffer, '\n')
+	}
 	f.buffer = append(f.buffer, chunk...)
 	var output [][]byte
 	for {
@@ -239,6 +242,16 @@ func (f *reasoningStreamFilter) Write(chunk []byte) ([][]byte, error) {
 		if err != nil {
 			return nil, err
 		}
+		if keep {
+			output = append(output, append(cleaned, '\n', '\n'))
+		}
+	}
+	if len(bytes.TrimSpace(f.buffer)) > 0 && reasoningSSECanEmitWithoutDelimiter(f.buffer) {
+		cleaned, keep, err := f.filterFrame(bytes.Clone(f.buffer))
+		if err != nil {
+			return nil, err
+		}
+		f.buffer = f.buffer[:0]
 		if keep {
 			output = append(output, append(cleaned, '\n', '\n'))
 		}
@@ -293,6 +306,42 @@ func findSSEFrameEnd(data []byte) (int, int) {
 		return crlf, 4
 	}
 	return lf, 2
+}
+
+func reasoningSSECanEmitWithoutDelimiter(chunk []byte) bool {
+	trimmed := bytes.TrimSpace(chunk)
+	if len(trimmed) == 0 {
+		return false
+	}
+	hasEvent := false
+	hasData := false
+	for _, line := range bytes.Split(trimmed, []byte("\n")) {
+		line = bytes.TrimSpace(bytes.TrimRight(line, "\r"))
+		switch {
+		case bytes.HasPrefix(line, []byte("event:")):
+			hasEvent = true
+		case bytes.HasPrefix(line, []byte("data:")):
+			hasData = true
+			data := bytes.TrimSpace(line[len("data:"):])
+			if len(data) > 0 && !bytes.Equal(data, []byte("[DONE]")) && !json.Valid(data) {
+				return false
+			}
+		}
+	}
+	return hasData && (!hasEvent || hasData)
+}
+
+func reasoningSSENeedsLineBreak(pending, chunk []byte) bool {
+	if len(pending) == 0 || len(chunk) == 0 || bytes.HasSuffix(pending, []byte("\n")) || bytes.HasSuffix(pending, []byte("\r")) || chunk[0] == '\n' || chunk[0] == '\r' {
+		return false
+	}
+	trimmed := bytes.TrimLeft(chunk, " \t")
+	for _, prefix := range [][]byte{[]byte("data:"), []byte("event:"), []byte("id:"), []byte("retry:"), []byte(":")} {
+		if bytes.HasPrefix(trimmed, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func (f *reasoningStreamFilter) filterFrame(frame []byte) ([]byte, bool, error) {
