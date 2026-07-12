@@ -39,6 +39,23 @@ services:
     networks:
       - smartapi-edge
 
+  cliproxyapi-verify:
+    image: smart-cli-proxy:dev
+    container_name: cliproxyapi-verify
+    profiles: ["test"]
+    restart: "no"
+    ports:
+      - "127.0.0.1:8323:8317"
+    volumes:
+      - ./config.verify.yaml:/CLIProxyAPI/config.yaml
+    tmpfs:
+      - /root/.cli-proxy-api
+      - /CLIProxyAPI/logs
+    networks:
+      - smartapi-edge
+    depends_on:
+      - fake-upstream
+
 networks:
   smartapi-edge:
     external: true

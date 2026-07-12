@@ -2,6 +2,7 @@ import http from 'node:http';
 import { createHash } from 'node:crypto';
 
 const requests = [];
+const promptCache = new Set();
 let mode = 'normal';
 
 const readBody = (req) => new Promise((resolve, reject) => {
@@ -54,14 +55,26 @@ const keyLabel = (req) => {
   return createHash('sha256').update(key).digest('hex').slice(0, 10);
 };
 
-const anthropicUsage = {
-  input_tokens: 11,
-  cache_creation_input_tokens: 101,
-  cache_read_input_tokens: 202,
-  output_tokens: 3,
+const usageFor = (key, body) => {
+  const prompt = JSON.stringify({
+    key,
+    model: body.model,
+    system: systemTexts(body),
+    tools: body.tools || [],
+    messages: body.messages || [],
+  });
+  const fingerprint = createHash('sha256').update(prompt).digest('hex');
+  const cached = promptCache.has(fingerprint);
+  promptCache.add(fingerprint);
+  return {
+    input_tokens: 11,
+    cache_creation_input_tokens: cached ? 0 : 101,
+    cache_read_input_tokens: cached ? 202 : 0,
+    output_tokens: 3,
+  };
 };
 
-const streamResponse = (res, model) => {
+const streamResponse = (res, model, usage) => {
   res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
   const event = (type, data) => res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
   event('message_start', {
@@ -69,7 +82,7 @@ const streamResponse = (res, model) => {
     message: {
       id: 'msg_fake_stream', type: 'message', role: 'assistant', model,
       content: [], stop_reason: null,
-      usage: { ...anthropicUsage, output_tokens: 0 },
+      usage: { ...usage, output_tokens: 0 },
     },
   });
   event('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
@@ -83,6 +96,7 @@ const streamResponse = (res, model) => {
 const server = http.createServer(async (req, res) => {
   if (req.url === '/__reset' && req.method === 'POST') {
     requests.splice(0, requests.length);
+    promptCache.clear();
     mode = 'normal';
     return json(res, 200, { ok: true });
   }
@@ -93,6 +107,7 @@ const server = http.createServer(async (req, res) => {
     }
     mode = value;
     requests.splice(0, requests.length);
+    promptCache.clear();
     return json(res, 200, { ok: true, mode });
   }
   if (req.url === '/__summary' && req.method === 'GET') return json(res, 200, { requests });
@@ -103,6 +118,7 @@ const server = http.createServer(async (req, res) => {
   let body;
   try { body = await readBody(req); } catch { return json(res, 400, { error: { message: 'invalid json' } }); }
   const key = keyLabel(req);
+  const usage = usageFor(key, body);
   requests.push({
     key,
     model: body.model,
@@ -119,10 +135,10 @@ const server = http.createServer(async (req, res) => {
   if (mode === 'quota-first' && requests.length === 1) {
     return json(res, 429, { error: { type: 'GoUsageLimitError', message: 'Weekly usage limit reached' } });
   }
-  if (body.stream) return streamResponse(res, body.model);
+  if (body.stream) return streamResponse(res, body.model, usage);
   return json(res, 200, {
     id: 'msg_fake', type: 'message', role: 'assistant', model: body.model,
-    content: [{ type: 'text', text: 'FAKE_OK' }], stop_reason: 'end_turn', usage: anthropicUsage,
+    content: [{ type: 'text', text: 'FAKE_OK' }], stop_reason: 'end_turn', usage,
   });
 });
 
