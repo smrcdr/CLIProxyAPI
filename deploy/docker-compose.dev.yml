@@ -15,9 +15,9 @@ services:
     ports:
       - "127.0.0.1:8322:8317"
     volumes:
-      - ../runtime/config.yaml:/CLIProxyAPI/config.yaml:ro
-      - ../runtime/auths:/root/.cli-proxy-api
-      - ../runtime/logs:/CLIProxyAPI/logs
+      - ${RUNTIME_DIR:-../runtime}/config.yaml:/CLIProxyAPI/config.yaml:ro
+      - ${RUNTIME_DIR:-../runtime}/auths:/root/.cli-proxy-api
+      - ${RUNTIME_DIR:-../runtime}/logs:/CLIProxyAPI/logs
     networks:
       - smartapi-edge
     healthcheck:
@@ -26,6 +26,18 @@ services:
       timeout: 5s
       retries: 5
       start_period: 15s
+
+  fake-upstream:
+    image: node:22-alpine
+    container_name: cliproxyapi-fake-upstream-v2
+    profiles: ["test"]
+    restart: "no"
+    working_dir: /app
+    command: ["node", "fake-upstream.mjs"]
+    volumes:
+      - ./fake-upstream.mjs:/app/fake-upstream.mjs:ro
+    networks:
+      - smartapi-edge
 
 networks:
   smartapi-edge:
