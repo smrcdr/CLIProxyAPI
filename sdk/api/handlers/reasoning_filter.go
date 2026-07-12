@@ -218,6 +218,14 @@ func newReasoningStreamFilter(protocol string) *reasoningStreamFilter {
 }
 
 func (f *reasoningStreamFilter) Write(chunk []byte) ([][]byte, error) {
+	trimmed := bytes.TrimSpace(chunk)
+	if f.protocol != "openai-response" && len(f.buffer) == 0 && len(trimmed) > 0 && trimmed[0] == '{' {
+		cleaned, keep, err := f.filterJSONChunk(trimmed)
+		if err != nil || !keep {
+			return nil, err
+		}
+		return [][]byte{cleaned}, nil
+	}
 	f.buffer = append(f.buffer, chunk...)
 	var output [][]byte
 	for {
@@ -236,6 +244,32 @@ func (f *reasoningStreamFilter) Write(chunk []byte) ([][]byte, error) {
 		}
 	}
 	return output, nil
+}
+
+func (f *reasoningStreamFilter) filterJSONChunk(raw []byte) ([]byte, bool, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var event map[string]any
+	if err := decoder.Decode(&event); err != nil {
+		return nil, false, fmt.Errorf("reasoning filter: invalid stream JSON: %w", err)
+	}
+	if err := ensureJSONEOF(decoder); err != nil {
+		return nil, false, fmt.Errorf("reasoning filter: invalid stream JSON: %w", err)
+	}
+	keep := true
+	if f.protocol == "claude" {
+		keep = f.filterMessagesEvent(event)
+	} else {
+		f.filterChatEvent(event)
+	}
+	if !keep {
+		return nil, false, nil
+	}
+	cleaned, err := json.Marshal(event)
+	if err != nil {
+		return nil, false, fmt.Errorf("reasoning filter: encode stream JSON: %w", err)
+	}
+	return cleaned, true, nil
 }
 
 func (f *reasoningStreamFilter) Flush() ([][]byte, error) {

@@ -48,6 +48,32 @@ func TestReasoningStreamFilterChatHandlesSplitThinkTags(t *testing.T) {
 	assertContains(t, output, "hello ", "world", "call_1", "reasoning_tokens", "[DONE]")
 }
 
+func TestReasoningStreamFilterRawChatChunks(t *testing.T) {
+	filter := newReasoningStreamFilter("openai")
+	chunks := [][]byte{
+		[]byte(`{"choices":[{"index":0,"delta":{"content":"hello <think>hidden"}}]}`),
+		[]byte(`{"choices":[{"index":0,"delta":{"content":"more</think>world","reasoning_content":"secret"}}],"usage":{"completion_tokens_details":{"reasoning_tokens":2}}}`),
+	}
+	output := collectRawFilteredChunks(t, filter, chunks)
+	assertNotContains(t, output, "hidden", "more", "secret", "reasoning_content")
+	assertContains(t, output, "hello ", "world", "reasoning_tokens")
+}
+
+func TestReasoningStreamFilterRawMessagesChunks(t *testing.T) {
+	filter := newReasoningStreamFilter("claude")
+	chunks := [][]byte{
+		[]byte(`{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`),
+		[]byte(`{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"secret"}}`),
+		[]byte(`{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`),
+		[]byte(`{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"OK"}}`),
+		[]byte(`{"type":"content_block_stop","index":1}`),
+		[]byte(`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":4}}`),
+	}
+	output := collectRawFilteredChunks(t, filter, chunks)
+	assertNotContains(t, output, "secret", "thinking_delta", `"index":1`)
+	assertContains(t, output, "OK", `"index":0`, "output_tokens")
+}
+
 func TestReasoningStreamFilterResponsesDropsEventsAndRenumbers(t *testing.T) {
 	filter := newReasoningStreamFilter("openai-response")
 	chunks := [][]byte{
@@ -117,6 +143,28 @@ func collectFilteredChunks(t *testing.T, filter *reasoningStreamFilter, chunks [
 	}
 	if eventCount == 0 {
 		t.Fatalf("no JSON events emitted: %s", output)
+	}
+	return output
+}
+
+func collectRawFilteredChunks(t *testing.T, filter *reasoningStreamFilter, chunks [][]byte) []byte {
+	t.Helper()
+	var output []byte
+	for _, chunk := range chunks {
+		cleaned, err := filter.Write(chunk)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, item := range cleaned {
+			if !json.Valid(item) {
+				t.Fatalf("invalid JSON chunk: %s", item)
+			}
+			output = append(output, item...)
+			output = append(output, '\n')
+		}
+	}
+	if _, err := filter.Flush(); err != nil {
+		t.Fatal(err)
 	}
 	return output
 }
