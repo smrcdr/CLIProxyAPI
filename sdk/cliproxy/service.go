@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -1259,11 +1260,15 @@ func (s *Service) applyConfigUpdateWithAuthSynthesis(newCfg *config.Config, synt
 	previousStrategy := ""
 	var previousSessionAffinity bool
 	var previousSessionAffinityTTL string
+	var previousSmartAPIAffinity bool
+	var previousSmartAPIAffinityTTL string
 	s.cfgMu.RLock()
 	if s.cfg != nil {
 		previousStrategy = strings.ToLower(strings.TrimSpace(s.cfg.Routing.Strategy))
 		previousSessionAffinity = s.cfg.Routing.SessionAffinity
 		previousSessionAffinityTTL = s.cfg.Routing.SessionAffinityTTL
+		previousSmartAPIAffinity = s.cfg.Routing.SmartAPIAffinity
+		previousSmartAPIAffinityTTL = s.cfg.Routing.SmartAPIAffinityTTL
 	}
 	s.cfgMu.RUnlock()
 
@@ -1290,10 +1295,14 @@ func (s *Service) applyConfigUpdateWithAuthSynthesis(newCfg *config.Config, synt
 
 	nextSessionAffinity := newCfg.Routing.SessionAffinity
 	nextSessionAffinityTTL := newCfg.Routing.SessionAffinityTTL
+	nextSmartAPIAffinity := newCfg.Routing.SmartAPIAffinity
+	nextSmartAPIAffinityTTL := newCfg.Routing.SmartAPIAffinityTTL
 
 	selectorChanged := previousStrategy != nextStrategy ||
 		previousSessionAffinity != nextSessionAffinity ||
-		previousSessionAffinityTTL != nextSessionAffinityTTL
+		previousSessionAffinityTTL != nextSessionAffinityTTL ||
+		previousSmartAPIAffinity != nextSmartAPIAffinity ||
+		previousSmartAPIAffinityTTL != nextSmartAPIAffinityTTL
 
 	if s.coreManager != nil && selectorChanged {
 		var selector coreauth.Selector
@@ -1315,6 +1324,15 @@ func (s *Service) applyConfigUpdateWithAuthSynthesis(newCfg *config.Config, synt
 				Fallback: selector,
 				TTL:      ttl,
 			})
+		}
+		if nextSmartAPIAffinity {
+			ttl := 30 * 24 * time.Hour
+			if ttlStr := strings.TrimSpace(nextSmartAPIAffinityTTL); ttlStr != "" {
+				if parsed, errParse := time.ParseDuration(ttlStr); errParse == nil && parsed > 0 {
+					ttl = parsed
+				}
+			}
+			selector = coreauth.NewSmartAPIAffinitySelector(selector, filepath.Join(newCfg.AuthDir, "smartapi-affinity.json"), ttl)
 		}
 
 		s.coreManager.SetSelector(selector)

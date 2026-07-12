@@ -119,6 +119,16 @@ request-retry: 3
 # Maximum number of different credentials to try for one failed request.
 # Set to 0 to keep legacy behavior (try all available credentials).
 max-retry-credentials: 0
+# Bound the total retry chain and each non-streaming credential attempt for SmartAPI-style deployments.
+# retry-budget-ms: 300000
+# credential-attempt-timeout-ms: 180000
+
+# Optional model-specific Anthropic system instructions. Rules match the requested alias first.
+# model-instructions:
+#   gpt-5.5:
+#     enabled: true
+#     mode: prepend # prepend, append, or override
+#     prompt: "Keep answers concise."
 
 # Maximum wait time in seconds for a cooled-down credential before triggering a retry.
 max-retry-interval: 30
@@ -176,6 +186,9 @@ routing:
   session-affinity: false # default: false
   # How long session-to-auth bindings are retained. Default: 1h
   session-affinity-ttl: "1h"
+  # Persist affinity for trusted SmartAPI client identities (X-SmartAPI-Affinity-Key).
+  smartapi-affinity: false
+  smartapi-affinity-ttl: "720h"
 
 # Codex provider behavior.
 codex:

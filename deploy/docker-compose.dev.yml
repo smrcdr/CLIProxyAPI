@@ -1,0 +1,33 @@
+name: smart-cli-proxy-dev
+
+services:
+  cliproxyapi-dev:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${VERSION:-dev}
+        COMMIT: ${COMMIT:-unknown}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
+    image: smart-cli-proxy:dev
+    container_name: cliproxyapi-dev
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8322:8317"
+    volumes:
+      - ../runtime/config.yaml:/CLIProxyAPI/config.yaml:ro
+      - ../runtime/auths:/root/.cli-proxy-api
+      - ../runtime/logs:/CLIProxyAPI/logs
+    networks:
+      - smartapi-edge
+    healthcheck:
+      test: ["CMD-SHELL", "grep -aq CLIProxyAPI /proc/1/cmdline"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+networks:
+  smartapi-edge:
+    external: true
+    name: smartapi-edge

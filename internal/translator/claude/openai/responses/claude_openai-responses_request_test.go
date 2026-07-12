@@ -10,6 +10,20 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
+func TestConvertOpenAIResponsesRequestToClaude_PreservesSystemInstructions(t *testing.T) {
+	raw := []byte(`{"instructions":"from instructions","input":[{"type":"message","role":"system","content":[{"type":"input_text","text":"from input"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`)
+	result := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	if got := gjson.GetBytes(result, "system.0.text").String(); got != "from instructions" {
+		t.Fatalf("first system block = %q", got)
+	}
+	if got := gjson.GetBytes(result, "system.1.text").String(); got != "from input" {
+		t.Fatalf("second system block = %q", got)
+	}
+	if got := gjson.GetBytes(result, "messages.0.role").String(); got != "user" {
+		t.Fatalf("first message role = %q, want user", got)
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToClaude_SanitizesToolCallIDsForClaude(t *testing.T) {
 	inputJSON := `{
 		"model": "gpt-4.1",

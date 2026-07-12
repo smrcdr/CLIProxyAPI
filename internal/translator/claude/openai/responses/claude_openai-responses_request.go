@@ -127,47 +127,41 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	// Stream
 	out, _ = sjson.SetBytes(out, "stream", stream)
 
-	// instructions -> as a leading message (use role user for Claude API compatibility)
-	instructionsText := ""
-	extractedFromSystem := false
-	if instr := root.Get("instructions"); instr.Exists() && instr.Type == gjson.String {
-		instructionsText = instr.String()
-		if instructionsText != "" {
-			sysMsg := []byte(`{"role":"user","content":""}`)
-			sysMsg, _ = sjson.SetBytes(sysMsg, "content", instructionsText)
-			out, _ = sjson.SetRawBytes(out, "messages.-1", sysMsg)
-		}
+	// Responses instructions and system input items belong to Claude's top-level system.
+	// Keeping them out of messages preserves their role and prompt-cache semantics.
+	var systemParts []string
+	if instr := root.Get("instructions"); instr.Exists() && instr.Type == gjson.String && instr.String() != "" {
+		systemParts = append(systemParts, instr.String())
 	}
-
-	if instructionsText == "" {
-		if input := root.Get("input"); input.Exists() && input.IsArray() {
-			input.ForEach(func(_, item gjson.Result) bool {
-				if strings.EqualFold(item.Get("role").String(), "system") {
-					var builder strings.Builder
-					if parts := item.Get("content"); parts.Exists() && parts.IsArray() {
-						parts.ForEach(func(_, part gjson.Result) bool {
-							textResult := part.Get("text")
-							text := textResult.String()
-							if builder.Len() > 0 && text != "" {
-								builder.WriteByte('\n')
-							}
-							builder.WriteString(text)
-							return true
-						})
-					} else if parts.Type == gjson.String {
-						builder.WriteString(parts.String())
+	if input := root.Get("input"); input.Exists() && input.IsArray() {
+		input.ForEach(func(_, item gjson.Result) bool {
+			if !strings.EqualFold(item.Get("role").String(), "system") {
+				return true
+			}
+			var builder strings.Builder
+			parts := item.Get("content")
+			if parts.Exists() && parts.IsArray() {
+				parts.ForEach(func(_, part gjson.Result) bool {
+					text := part.Get("text").String()
+					if builder.Len() > 0 && text != "" {
+						builder.WriteByte('\n')
 					}
-					instructionsText = builder.String()
-					if instructionsText != "" {
-						sysMsg := []byte(`{"role":"user","content":""}`)
-						sysMsg, _ = sjson.SetBytes(sysMsg, "content", instructionsText)
-						out, _ = sjson.SetRawBytes(out, "messages.-1", sysMsg)
-						extractedFromSystem = true
-					}
-				}
-				return instructionsText == ""
-			})
-		}
+					builder.WriteString(text)
+					return true
+				})
+			} else if parts.Type == gjson.String {
+				builder.WriteString(parts.String())
+			}
+			if builder.Len() > 0 {
+				systemParts = append(systemParts, builder.String())
+			}
+			return true
+		})
+	}
+	for _, text := range systemParts {
+		block := []byte(`{"type":"text","text":""}`)
+		block, _ = sjson.SetBytes(block, "text", text)
+		out, _ = sjson.SetRawBytes(out, "system.-1", block)
 	}
 
 	// input array processing
@@ -213,7 +207,7 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
 		input.ForEach(func(_, item gjson.Result) bool {
-			if extractedFromSystem && strings.EqualFold(item.Get("role").String(), "system") {
+			if strings.EqualFold(item.Get("role").String(), "system") {
 				return true
 			}
 			typ := item.Get("type").String()

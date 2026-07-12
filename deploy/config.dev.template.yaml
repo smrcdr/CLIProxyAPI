@@ -1,0 +1,39 @@
+host: ""
+port: 8317
+
+remote-management:
+  allow-remote: true
+  secret-key: "replace-on-dev-only"
+  disable-control-panel: true
+
+auth-dir: "/root/.cli-proxy-api"
+api-keys:
+  - "replace-on-dev-only"
+
+debug: false
+logging-to-file: true
+logs-max-total-size-mb: 100
+usage-statistics-enabled: true
+
+# One execution cycle tries every active credential only once.
+request-retry: 0
+max-retry-credentials: 0
+max-retry-interval: 0
+retry-budget-ms: 300000
+credential-attempt-timeout-ms: 180000
+disable-cooling: false
+save-cooldown-status: true
+transient-error-cooldown-seconds: 3600
+
+disable-claude-cloak-mode: true
+disable-image-generation: "passthrough"
+
+routing:
+  strategy: "round-robin"
+  session-affinity: true
+  session-affinity-ttl: "720h"
+  smartapi-affinity: true
+  smartapi-affinity-ttl: "720h"
+
+model-instructions: {}
+claude-api-key: []

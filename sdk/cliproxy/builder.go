@@ -6,6 +6,7 @@ package cliproxy
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -258,6 +259,15 @@ func (b *Builder) Build() (*Service, error) {
 				Fallback: selector,
 				TTL:      sessionAffinityTTL,
 			})
+		}
+		if b.cfg != nil && b.cfg.Routing.SmartAPIAffinity {
+			ttl := 30 * 24 * time.Hour
+			if ttlStr := strings.TrimSpace(b.cfg.Routing.SmartAPIAffinityTTL); ttlStr != "" {
+				if parsed, errParse := time.ParseDuration(ttlStr); errParse == nil && parsed > 0 {
+					ttl = parsed
+				}
+			}
+			selector = coreauth.NewSmartAPIAffinitySelector(selector, filepath.Join(b.cfg.AuthDir, "smartapi-affinity.json"), ttl)
 		}
 
 		coreManager = coreauth.NewManager(tokenStore, selector, nil)

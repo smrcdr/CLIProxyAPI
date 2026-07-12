@@ -99,6 +99,12 @@ type Config struct {
 	MaxRetryCredentials int `yaml:"max-retry-credentials" json:"max-retry-credentials"`
 	// MaxRetryInterval defines the maximum wait time in seconds before retrying a cooled-down credential.
 	MaxRetryInterval int `yaml:"max-retry-interval" json:"max-retry-interval"`
+	// RetryBudgetMS bounds the whole cross-credential retry chain. Zero disables the budget.
+	RetryBudgetMS int `yaml:"retry-budget-ms" json:"retry-budget-ms"`
+	// CredentialAttemptTimeoutMS bounds a single non-streaming upstream attempt. Zero disables it.
+	CredentialAttemptTimeoutMS int `yaml:"credential-attempt-timeout-ms" json:"credential-attempt-timeout-ms"`
+	// ModelInstructions applies a system instruction to requests for a client-visible model alias.
+	ModelInstructions map[string]ModelInstruction `yaml:"model-instructions" json:"model-instructions"`
 
 	// QuotaExceeded defines the behavior when a quota is exceeded.
 	QuotaExceeded QuotaExceeded `yaml:"quota-exceeded" json:"quota-exceeded"`
@@ -167,6 +173,13 @@ type Config struct {
 
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
+}
+
+// ModelInstruction is a model-specific system instruction applied to Claude payloads.
+type ModelInstruction struct {
+	Enabled bool   `yaml:"enabled" json:"enabled"`
+	Mode    string `yaml:"mode" json:"mode"`
+	Prompt  string `yaml:"prompt" json:"prompt"`
 }
 
 // PluginsConfig holds dynamic plugin system settings.
@@ -347,6 +360,11 @@ type RoutingConfig struct {
 	// SessionAffinityTTL specifies how long session-to-auth bindings are retained.
 	// Default: 1h. Accepts duration strings like "30m", "1h", "2h30m".
 	SessionAffinityTTL string `yaml:"session-affinity-ttl,omitempty" json:"session-affinity-ttl,omitempty"`
+
+	// SmartAPIAffinity enables persistent client-key affinity for trusted SmartAPI traffic.
+	SmartAPIAffinity bool `yaml:"smartapi-affinity,omitempty" json:"smartapi-affinity,omitempty"`
+	// SmartAPIAffinityTTL controls the persisted binding lifetime. Default: 720h.
+	SmartAPIAffinityTTL string `yaml:"smartapi-affinity-ttl,omitempty" json:"smartapi-affinity-ttl,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
