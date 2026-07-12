@@ -1,6 +1,8 @@
 import http from 'node:http';
+import { createHash } from 'node:crypto';
 
 const requests = [];
+let mode = 'normal';
 
 const readBody = (req) => new Promise((resolve, reject) => {
   let raw = '';
@@ -49,10 +51,7 @@ const contentTexts = (content) => {
 
 const keyLabel = (req) => {
   const key = String(req.headers['x-api-key'] || req.headers.authorization || 'missing');
-  if (key.includes('timeout')) return 'timeout';
-  if (key.includes('quota')) return 'quota';
-  if (key.includes('success')) return 'success';
-  return 'other';
+  return createHash('sha256').update(key).digest('hex').slice(0, 10);
 };
 
 const anthropicUsage = {
@@ -84,7 +83,17 @@ const streamResponse = (res, model) => {
 const server = http.createServer(async (req, res) => {
   if (req.url === '/__reset' && req.method === 'POST') {
     requests.splice(0, requests.length);
+    mode = 'normal';
     return json(res, 200, { ok: true });
+  }
+  if (req.url?.startsWith('/__mode') && req.method === 'POST') {
+    const value = new URL(req.url, 'http://localhost').searchParams.get('value');
+    if (!['normal', 'timeout-first-two', 'quota-first'].includes(value)) {
+      return json(res, 400, { error: 'invalid mode' });
+    }
+    mode = value;
+    requests.splice(0, requests.length);
+    return json(res, 200, { ok: true, mode });
   }
   if (req.url === '/__summary' && req.method === 'GET') return json(res, 200, { requests });
   if (!req.url?.startsWith('/v1/messages') || req.method !== 'POST') {
@@ -104,8 +113,12 @@ const server = http.createServer(async (req, res) => {
     messageTexts: (body.messages || []).map((message) => contentTexts(message?.content)),
   });
 
-  if (key === 'timeout') return json(res, 500, { error: { type: 'InternalError', message: 'Request timed out' } });
-  if (key === 'quota') return json(res, 429, { error: { type: 'GoUsageLimitError', message: 'Weekly usage limit reached' } });
+  if (mode === 'timeout-first-two' && requests.length <= 2) {
+    return json(res, 500, { error: { type: 'InternalError', message: 'Request timed out' } });
+  }
+  if (mode === 'quota-first' && requests.length === 1) {
+    return json(res, 429, { error: { type: 'GoUsageLimitError', message: 'Weekly usage limit reached' } });
+  }
   if (body.stream) return streamResponse(res, body.model);
   return json(res, 200, {
     id: 'msg_fake', type: 'message', role: 'assistant', model: body.model,
