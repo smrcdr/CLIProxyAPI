@@ -5,6 +5,7 @@ cli-proxy-api
 # Configuration
 config.yaml
 .env
+/runtime/
 
 # Generated content
 bin/*
