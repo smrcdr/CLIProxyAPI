@@ -9,7 +9,14 @@ target_dir=${2:?target runtime directory is required}
 
 mkdir -p "$target_dir/auths" "$target_dir/logs"
 cp "$source_dir/config.yaml" "$target_dir/config.yaml"
-cp -a "$source_dir/auths/." "$target_dir/auths/"
+
+# The currently running PoC keeps its credentials root-owned. Docker already
+# has read access to that bind mount, so copy inside a short-lived local
+# container without exposing the credentials in the terminal or Git history.
+docker run --rm \
+  -v "$source_dir/auths:/from:ro" \
+  -v "$target_dir/auths:/to" \
+  alpine:3.21 sh -c 'cp -a /from/. /to/' >/dev/null
 
 sed -i \
   -e 's/^max-retry-credentials:.*/max-retry-credentials: 0/' \
