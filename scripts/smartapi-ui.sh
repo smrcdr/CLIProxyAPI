@@ -31,7 +31,8 @@ for argument in "$@"; do
   esac
 done
 
-script_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+script_path="$(readlink -f -- "${BASH_SOURCE[0]}")"
+script_directory="$(cd -- "$(dirname -- "$script_path")" && pwd)"
 admin_script="${script_directory}/${environment}-admin.sh"
 
 if [[ ! -x "$admin_script" ]]; then
