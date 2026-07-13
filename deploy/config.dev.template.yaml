@@ -36,4 +36,13 @@ routing:
   smartapi-affinity-ttl: "720h"
 
 model-instructions: {}
-claude-api-key: []
+
+payload:
+  override:
+    - models:
+        - name: "qwen3.7-plus"
+          protocol: "openai"
+      params:
+        reasoning_effort: "none"
+
+openai-compatibility: []

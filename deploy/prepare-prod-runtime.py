@@ -30,7 +30,11 @@ NATIVE_MODELS = (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--swaper-dir", required=True, type=Path)
-    parser.add_argument("--router-keys-file", required=True, type=Path)
+    parser.add_argument(
+        "--router-keys-file",
+        type=Path,
+        help="JSON router key list. When omitted, reuse api-keys from runtime/config.yaml.",
+    )
     parser.add_argument("--runtime-dir", required=True, type=Path)
     return parser.parse_args()
 
@@ -51,16 +55,50 @@ def require_secret_list(value: Any, label: str) -> list[str]:
     return result
 
 
-def existing_management_key(config_path: Path) -> str | None:
+def parse_yaml_scalar(value: str) -> str:
+    value = value.strip()
+    if value.startswith('"'):
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, str) else ""
+    if value.startswith("'") and value.endswith("'"):
+        return value[1:-1].replace("''", "'")
+    return value.split(" #", 1)[0].strip()
+
+
+def existing_runtime_secrets(config_path: Path) -> tuple[list[str], str | None]:
     if not config_path.exists():
-        return None
+        return [], None
     try:
         config = read_json(config_path)
     except (OSError, json.JSONDecodeError):
-        return None
-    remote_management = config.get("remote-management") if isinstance(config, dict) else None
-    key = remote_management.get("secret-key") if isinstance(remote_management, dict) else None
-    return key if isinstance(key, str) and key else None
+        config = None
+    if isinstance(config, dict):
+        router_keys = require_secret_list(config.get("api-keys", []), "existing router keys")
+        remote_management = config.get("remote-management")
+        key = remote_management.get("secret-key") if isinstance(remote_management, dict) else None
+        return router_keys, key if isinstance(key, str) and key else None
+
+    router_keys: list[str] = []
+    management_key: str | None = None
+    section = ""
+    with config_path.open("r", encoding="utf-8") as handle:
+        for raw_line in handle:
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            indent = len(raw_line) - len(raw_line.lstrip())
+            if indent == 0 and not stripped.startswith("-"):
+                section = stripped[:-1] if stripped.endswith(":") else ""
+                continue
+            if section == "api-keys" and stripped.startswith("-"):
+                value = parse_yaml_scalar(stripped[1:])
+                if value:
+                    router_keys.append(value)
+            elif section == "remote-management" and stripped.startswith("secret-key:"):
+                value = parse_yaml_scalar(stripped.split(":", 1)[1])
+                if value:
+                    management_key = value
+    return require_secret_list(router_keys, "existing router keys"), management_key
 
 
 def build_models(model_map: dict[str, str]) -> list[dict[str, Any]]:
@@ -94,17 +132,14 @@ def build_config(
         raise ValueError("reasoning stripping is not enabled for every legacy protocol")
 
     models = build_models(model_map)
-    claude_entries = [
-        {
-            "api-key": key,
-            "base-url": "https://opencode.ai/zen/go",
-            "proxy-url": "",
-            "headers": {"x-api-key": key},
-            "models": models,
-            "cloak": {"mode": "never"},
-        }
-        for key in upstream_keys
-    ]
+    openai_provider = {
+        "name": "opencode-go",
+        "base-url": "https://opencode.ai/zen/go/v1",
+        "api-key-entries": [
+            {"api-key": key, "proxy-url": ""} for key in upstream_keys
+        ],
+        "models": models,
+    }
 
     return {
         "smart-management-enabled": True,
@@ -141,7 +176,15 @@ def build_config(
         },
         "ws-auth": True,
         "model-instructions": instructions,
-        "claude-api-key": claude_entries,
+        "payload": {
+            "override": [
+                {
+                    "models": [{"name": "qwen3.7-plus", "protocol": "openai"}],
+                    "params": {"reasoning_effort": "none"},
+                }
+            ]
+        },
+        "openai-compatibility": [openai_provider],
     }
 
 
@@ -167,7 +210,6 @@ def main() -> None:
     upstream_keys = require_secret_list(
         read_json(args.swaper_dir / "data" / "keys.json"), "upstream keys"
     )
-    router_keys = require_secret_list(read_json(args.router_keys_file), "router keys")
     if not isinstance(swaper_config, dict):
         raise ValueError("swaper config must be a JSON object")
 
@@ -175,7 +217,17 @@ def main() -> None:
     (args.runtime_dir / "auths").mkdir(mode=0o700, exist_ok=True)
     (args.runtime_dir / "logs").mkdir(mode=0o700, exist_ok=True)
     config_path = args.runtime_dir / "config.yaml"
-    management_key = existing_management_key(config_path) or secrets.token_urlsafe(48)
+    existing_router_keys, existing_management_key = existing_runtime_secrets(config_path)
+    router_keys = (
+        require_secret_list(read_json(args.router_keys_file), "router keys")
+        if args.router_keys_file
+        else existing_router_keys
+    )
+    if not router_keys:
+        raise ValueError(
+            "router keys are required: pass --router-keys-file or provide runtime/config.yaml"
+        )
+    management_key = existing_management_key or secrets.token_urlsafe(48)
     config = build_config(swaper_config, upstream_keys, router_keys, management_key)
     atomic_write(config_path, config)
     print(

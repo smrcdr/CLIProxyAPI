@@ -34,25 +34,22 @@ model-instructions:
     mode: prepend
     prompt: "VERIFY_PREPEND_RULE"
 
-claude-api-key:
-  - api-key: "verify-credential-one"
-    base-url: "http://fake-upstream:9000"
-    headers:
-      x-api-key: "verify-credential-one"
+payload:
+  override:
+    - models:
+        - name: "qwen3.7-plus"
+          protocol: "openai"
+      params:
+        reasoning_effort: "none"
+
+openai-compatibility:
+  - name: "opencode-go-verify"
+    base-url: "http://fake-upstream:9000/v1"
+    api-key-entries:
+      - api-key: "verify-credential-one"
+      - api-key: "verify-credential-two"
+      - api-key: "verify-credential-three"
     models:
       - name: "qwen3.7-plus"
         alias: "gpt-5.5"
-  - api-key: "verify-credential-two"
-    base-url: "http://fake-upstream:9000"
-    headers:
-      x-api-key: "verify-credential-two"
-    models:
-      - name: "qwen3.7-plus"
-        alias: "gpt-5.5"
-  - api-key: "verify-credential-three"
-    base-url: "http://fake-upstream:9000"
-    headers:
-      x-api-key: "verify-credential-three"
-    models:
-      - name: "qwen3.7-plus"
-        alias: "gpt-5.5"
+        force-mapping: true

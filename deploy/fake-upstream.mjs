@@ -37,10 +37,13 @@ const cacheLocations = (body) => {
 };
 
 const systemTexts = (body) => {
-  if (typeof body.system === 'string') return [body.system];
-  return (Array.isArray(body.system) ? body.system : [])
+  const topLevel = typeof body.system === 'string' ? [body.system] : (Array.isArray(body.system) ? body.system : [])
     .map((block) => typeof block === 'string' ? block : block?.text)
     .filter(Boolean);
+  const messageLevel = (body.messages || [])
+    .filter((message) => message?.role === 'system')
+    .flatMap((message) => contentTexts(message?.content));
+  return [...topLevel, ...messageLevel];
 };
 
 const contentTexts = (content) => {
@@ -93,6 +96,38 @@ const streamResponse = (res, model, usage) => {
   res.end();
 };
 
+const chatUsage = (usage) => ({
+  prompt_tokens: usage.input_tokens + usage.cache_creation_input_tokens + usage.cache_read_input_tokens,
+  completion_tokens: usage.output_tokens,
+  total_tokens: usage.input_tokens + usage.cache_creation_input_tokens + usage.cache_read_input_tokens + usage.output_tokens,
+  prompt_tokens_details: {
+    cached_tokens: usage.cache_read_input_tokens,
+    cache_creation_input_tokens: usage.cache_creation_input_tokens,
+  },
+});
+
+const streamChatResponse = (res, model, usage) => {
+  res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+  const chunk = (body) => res.write(`data: ${JSON.stringify(body)}\n\n`);
+  chunk({
+    id: 'chatcmpl_fake_stream', object: 'chat.completion.chunk', model,
+    choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }],
+  });
+  chunk({
+    id: 'chatcmpl_fake_stream', object: 'chat.completion.chunk', model,
+    choices: [{ index: 0, delta: { content: 'FAKE_OK' }, finish_reason: null }],
+  });
+  chunk({
+    id: 'chatcmpl_fake_stream', object: 'chat.completion.chunk', model,
+    choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+  });
+  chunk({
+    id: 'chatcmpl_fake_stream', object: 'chat.completion.chunk', model,
+    choices: [], usage: chatUsage(usage),
+  });
+  res.end('data: [DONE]\n\n');
+};
+
 const server = http.createServer(async (req, res) => {
   if (req.url === '/__reset' && req.method === 'POST') {
     requests.splice(0, requests.length);
@@ -111,7 +146,9 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, { ok: true, mode });
   }
   if (req.url === '/__summary' && req.method === 'GET') return json(res, 200, { requests });
-  if (!req.url?.startsWith('/v1/messages') || req.method !== 'POST') {
+  const isMessages = req.url?.startsWith('/v1/messages');
+  const isChat = req.url?.startsWith('/v1/chat/completions');
+  if ((!isMessages && !isChat) || req.method !== 'POST') {
     return json(res, 404, { error: { message: 'not found' } });
   }
 
@@ -120,9 +157,11 @@ const server = http.createServer(async (req, res) => {
   const key = keyLabel(req);
   const usage = usageFor(key, body);
   requests.push({
+    path: req.url,
     key,
     model: body.model,
     stream: !!body.stream,
+    reasoningEffort: body.reasoning_effort,
     cacheLocations: cacheLocations(body),
     systemTexts: systemTexts(body),
     messageRoles: (body.messages || []).map((message) => message?.role),
@@ -134,6 +173,15 @@ const server = http.createServer(async (req, res) => {
   }
   if (mode === 'quota-first' && requests.length === 1) {
     return json(res, 429, { error: { type: 'GoUsageLimitError', message: 'Weekly usage limit reached' } });
+  }
+  if (isChat) {
+    if (body.stream) return streamChatResponse(res, body.model, usage);
+    const chat = chatUsage(usage);
+    return json(res, 200, {
+      id: 'chatcmpl_fake', object: 'chat.completion', model: body.model,
+      choices: [{ index: 0, message: { role: 'assistant', content: 'FAKE_OK' }, finish_reason: 'stop' }],
+      usage: chat,
+    });
   }
   if (body.stream) return streamResponse(res, body.model, usage);
   return json(res, 200, {
