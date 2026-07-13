@@ -2,6 +2,7 @@ package management
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
 )
@@ -113,6 +115,109 @@ func TestSmartAPIAddRequiresCompleteTemplate(t *testing.T) {
 	handler.PostSmartAPIKey(context)
 	if recorder.Code != http.StatusConflict || len(cfg.ClaudeKey) != 1 {
 		t.Fatalf("response = %d, keys = %d", recorder.Code, len(cfg.ClaudeKey))
+	}
+}
+
+func TestSmartAPIManagementOpenAICompatibilityKeys(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const existingKey = "sk-opencode-openai-compat-1234"
+	provider := config.OpenAICompatibility{
+		Name:    "opencode-go",
+		BaseURL: "https://opencode.ai/zen/go/v1",
+		APIKeyEntries: []config.OpenAICompatibilityAPIKey{{
+			APIKey:   existingKey,
+			ProxyURL: "http://proxy.internal",
+		}},
+		Models:  []config.OpenAICompatibilityModel{{Name: "qwen3.7-plus", Alias: "opus-4.8", ForceMapping: true}},
+		Headers: map[string]string{"X-Routing": "smart"},
+	}
+	secretHash, err := bcrypt.GenerateFromPassword([]byte("management-test-key"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		SmartManagementEnabled: true,
+		RemoteManagement:       config.RemoteManagement{AllowRemote: true, SecretKey: string(secretHash)},
+		OpenAICompatibility:    []config.OpenAICompatibility{provider},
+	}
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	_, err = manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "opencode-go-runtime",
+		Provider: "openai-compatible-opencode-go",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			coreauth.AttributeAPIKey: existingKey,
+		},
+		Success: 9,
+		Failed:  2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	handler := NewHandler(cfg, path, manager)
+	router := gin.New()
+	group := router.Group("/v0/management")
+	group.Use(handler.Middleware())
+	group.GET("/smartapi/keys", handler.GetSmartAPIKeys)
+	group.GET("/smartapi/keys/:id/reveal", handler.RevealSmartAPIKey)
+	group.POST("/smartapi/keys", handler.PostSmartAPIKey)
+
+	list := performSmartAPIRequest(router, http.MethodGet, "/v0/management/smartapi/keys", nil, "management-test-key")
+	if list.Code != http.StatusOK {
+		t.Fatalf("list status = %d: %s", list.Code, list.Body.String())
+	}
+	var listed struct {
+		Keys []smartAPIKeyView `json:"keys"`
+	}
+	if err = json.Unmarshal(list.Body.Bytes(), &listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Keys) != 1 {
+		t.Fatalf("listed keys = %d, want 1: %s", len(listed.Keys), list.Body.String())
+	}
+	if !listed.Keys[0].Available || listed.Keys[0].Status != string(coreauth.StatusActive) || listed.Keys[0].Success != 9 || listed.Keys[0].Failed != 2 {
+		t.Fatalf("runtime key view = %#v", listed.Keys[0])
+	}
+	if strings.Contains(list.Body.String(), existingKey) {
+		t.Fatalf("masked list leaked full key: %s", list.Body.String())
+	}
+
+	id := smartAPIKeyID(existingKey)
+	reveal := performSmartAPIRequest(router, http.MethodGet, "/v0/management/smartapi/keys/"+id+"/reveal", nil, "management-test-key")
+	if reveal.Code != http.StatusOK || !strings.Contains(reveal.Body.String(), existingKey) {
+		t.Fatalf("reveal response = %d %s", reveal.Code, reveal.Body.String())
+	}
+
+	const newKey = "sk-opencode-openai-compat-5678"
+	added := performSmartAPIRequest(router, http.MethodPost, "/v0/management/smartapi/keys", map[string]any{"api_key": newKey}, "management-test-key")
+	if added.Code != http.StatusCreated {
+		t.Fatalf("add status = %d: %s", added.Code, added.Body.String())
+	}
+	if len(cfg.OpenAICompatibility) != 1 || len(cfg.OpenAICompatibility[0].APIKeyEntries) != 2 {
+		t.Fatalf("OpenAI-compatible provider after add = %#v", cfg.OpenAICompatibility)
+	}
+	wantEntry := provider.APIKeyEntries[0]
+	wantEntry.APIKey = newKey
+	if got := cfg.OpenAICompatibility[0].APIKeyEntries[1]; !reflect.DeepEqual(got, wantEntry) {
+		t.Fatalf("cloned API key entry = %#v, want %#v", got, wantEntry)
+	}
+	if !reflect.DeepEqual(cfg.OpenAICompatibility[0].Models, provider.Models) || !reflect.DeepEqual(cfg.OpenAICompatibility[0].Headers, provider.Headers) {
+		t.Fatal("adding an API key changed provider models or headers")
+	}
+
+	duplicate := performSmartAPIRequest(router, http.MethodPost, "/v0/management/smartapi/keys", map[string]any{"api_key": newKey}, "management-test-key")
+	if duplicate.Code != http.StatusConflict || len(cfg.OpenAICompatibility[0].APIKeyEntries) != 2 {
+		t.Fatalf("duplicate response = %d, entries = %d", duplicate.Code, len(cfg.OpenAICompatibility[0].APIKeyEntries))
 	}
 }
 
