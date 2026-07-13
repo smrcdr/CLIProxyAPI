@@ -44,6 +44,21 @@ def read_json(path: Path) -> Any:
         return json.load(handle)
 
 
+def read_runtime_config(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        config = read_json(path)
+    except (OSError, json.JSONDecodeError):
+        try:
+            import yaml  # type: ignore[import-not-found]
+        except ImportError:
+            return None
+        with path.open("r", encoding="utf-8") as handle:
+            config = yaml.safe_load(handle)
+    return config if isinstance(config, dict) else None
+
+
 def require_secret_list(value: Any, label: str) -> list[str]:
     if not isinstance(value, list):
         raise ValueError(f"{label} must be a JSON list")
@@ -68,10 +83,7 @@ def parse_yaml_scalar(value: str) -> str:
 def existing_runtime_secrets(config_path: Path) -> tuple[list[str], str | None]:
     if not config_path.exists():
         return [], None
-    try:
-        config = read_json(config_path)
-    except (OSError, json.JSONDecodeError):
-        config = None
+    config = read_runtime_config(config_path)
     if isinstance(config, dict):
         router_keys = require_secret_list(config.get("api-keys", []), "existing router keys")
         remote_management = config.get("remote-management")
@@ -101,6 +113,53 @@ def existing_runtime_secrets(config_path: Path) -> tuple[list[str], str | None]:
     return require_secret_list(router_keys, "existing router keys"), management_key
 
 
+def existing_openai_source(
+    config: dict[str, Any] | None,
+) -> tuple[dict[str, str], dict[str, Any], list[str]]:
+    if not config:
+        return {}, {}, []
+
+    model_map: dict[str, str] = {}
+    upstream_keys: list[str] = []
+    providers = config.get("openai-compatibility")
+    if isinstance(providers, list):
+        for provider in providers:
+            if not isinstance(provider, dict):
+                continue
+            for entry in provider.get("api-key-entries") or []:
+                if isinstance(entry, dict) and isinstance(entry.get("api-key"), str):
+                    upstream_keys.append(entry["api-key"].strip())
+            for model in provider.get("models") or []:
+                if isinstance(model, dict):
+                    name = model.get("name")
+                    alias = model.get("alias")
+                    if isinstance(name, str) and isinstance(alias, str) and name != alias:
+                        model_map[alias] = name
+
+    claude_entries = config.get("claude-api-key")
+    if not upstream_keys and isinstance(claude_entries, list):
+        for entry in claude_entries:
+            if not isinstance(entry, dict):
+                continue
+            if isinstance(entry.get("api-key"), str):
+                upstream_keys.append(entry["api-key"].strip())
+            for model in entry.get("models") or []:
+                if isinstance(model, dict):
+                    name = model.get("name")
+                    alias = model.get("alias")
+                    if isinstance(name, str) and isinstance(alias, str) and name != alias:
+                        model_map[alias] = name
+
+    instructions = config.get("model-instructions")
+    if not isinstance(instructions, dict):
+        instructions = {}
+    return (
+        model_map,
+        instructions,
+        require_secret_list(list(dict.fromkeys(upstream_keys)), "existing upstream keys"),
+    )
+
+
 def build_models(model_map: dict[str, str]) -> list[dict[str, Any]]:
     models = [
         {"name": model, "alias": model, "force-mapping": True}
@@ -124,8 +183,13 @@ def build_config(
     strip_reasoning = swaper_config.get("stripReasoning")
     if not isinstance(model_map, dict) or not model_map:
         raise ValueError("swaper config has no modelMap")
-    if not isinstance(instructions, dict) or set(instructions) != set(model_map):
-        raise ValueError("modelInstructions must cover every aliased model")
+    if not isinstance(instructions, dict):
+        instructions = {}
+    instructions = {
+        alias: instruction
+        for alias, instruction in instructions.items()
+        if alias in model_map
+    }
     if not isinstance(strip_reasoning, dict) or not all(
         strip_reasoning.get(protocol) is True for protocol in ("chat", "responses", "anthropic")
     ):
@@ -207,7 +271,7 @@ def atomic_write(path: Path, value: dict[str, Any]) -> None:
 def main() -> None:
     args = parse_args()
     swaper_config = read_json(args.swaper_dir / "data" / "config.json")
-    upstream_keys = require_secret_list(
+    swaper_upstream_keys = require_secret_list(
         read_json(args.swaper_dir / "data" / "keys.json"), "upstream keys"
     )
     if not isinstance(swaper_config, dict):
@@ -217,7 +281,16 @@ def main() -> None:
     (args.runtime_dir / "auths").mkdir(mode=0o700, exist_ok=True)
     (args.runtime_dir / "logs").mkdir(mode=0o700, exist_ok=True)
     config_path = args.runtime_dir / "config.yaml"
+    existing_config = read_runtime_config(config_path)
     existing_router_keys, existing_management_key = existing_runtime_secrets(config_path)
+    existing_model_map, existing_instructions, existing_upstream_keys = existing_openai_source(
+        existing_config
+    )
+    if existing_model_map:
+        swaper_config["modelMap"] = existing_model_map
+    if existing_instructions:
+        swaper_config["modelInstructions"] = existing_instructions
+    upstream_keys = existing_upstream_keys or swaper_upstream_keys
     router_keys = (
         require_secret_list(read_json(args.router_keys_file), "router keys")
         if args.router_keys_file

@@ -85,6 +85,79 @@ debug: false
                 (["router-three"], "management-json"),
             )
 
+    def test_existing_openai_source_migrates_claude_runtime(self) -> None:
+        existing_config = {
+            "model-instructions": {
+                "gpt-5.5": {
+                    "enabled": True,
+                    "mode": "prepend",
+                    "prompt": "GPT instruction",
+                },
+                "opus-4.8": {
+                    "enabled": True,
+                    "mode": "prepend",
+                    "prompt": "Claude instruction",
+                },
+            },
+            "claude-api-key": [
+                {
+                    "api-key": "upstream-one",
+                    "models": [
+                        {
+                            "name": "qwen3.7-plus",
+                            "alias": "gpt-5.5",
+                            "force-mapping": True,
+                        },
+                        {
+                            "name": "qwen3.7-plus",
+                            "alias": "opus-4.8",
+                            "force-mapping": True,
+                        },
+                        {
+                            "name": "qwen3.7-plus",
+                            "alias": "qwen3.7-plus",
+                            "force-mapping": True,
+                        },
+                    ],
+                },
+                {"api-key": "upstream-two", "models": []},
+            ],
+        }
+
+        model_map, instructions, upstream_keys = prepare.existing_openai_source(
+            existing_config
+        )
+
+        self.assertEqual(
+            model_map,
+            {"gpt-5.5": "qwen3.7-plus", "opus-4.8": "qwen3.7-plus"},
+        )
+        self.assertEqual(instructions, existing_config["model-instructions"])
+        self.assertEqual(upstream_keys, ["upstream-one", "upstream-two"])
+
+        migrated = prepare.build_config(
+            {
+                "modelMap": model_map,
+                "modelInstructions": instructions,
+                "stripReasoning": {
+                    "chat": True,
+                    "responses": True,
+                    "anthropic": True,
+                },
+            },
+            upstream_keys,
+            ["router-key"],
+            "management-key",
+        )
+        self.assertNotIn("claude-api-key", migrated)
+        aliases = {
+            model["alias"]: model["name"]
+            for model in migrated["openai-compatibility"][0]["models"]
+        }
+        self.assertEqual(aliases["gpt-5.5"], "qwen3.7-plus")
+        self.assertEqual(aliases["opus-4.8"], "qwen3.7-plus")
+        self.assertEqual(migrated["model-instructions"], instructions)
+
 
 if __name__ == "__main__":
     unittest.main()
