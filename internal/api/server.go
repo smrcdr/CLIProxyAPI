@@ -35,6 +35,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/safemode"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/smartapiusage"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
@@ -352,6 +353,12 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 	auth.SetTransientErrorCooldownSeconds(cfg.TransientErrorCooldownSeconds)
 	applySignatureCacheConfig(nil, cfg)
+	if cfg.SmartManagementEnabled && strings.TrimSpace(configFilePath) != "" {
+		analyticsPath := filepath.Join(filepath.Dir(configFilePath), "logs", "smartapi-usage.json")
+		if errAnalytics := smartapiusage.DefaultStore().Configure(analyticsPath); errAnalytics != nil {
+			log.WithError(errAnalytics).Warn("failed to configure SmartAPI usage analytics persistence")
+		}
+	}
 	// Initialize management handler
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
 	s.mgmt.SetPluginHost(optionState.pluginHost)
@@ -734,6 +741,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/api-key-usage", s.mgmt.GetAPIKeyUsage)
 		mgmt.GET("/smartapi/overview", s.mgmt.GetSmartAPIOverview)
 		mgmt.GET("/smartapi/keys", s.mgmt.GetSmartAPIKeys)
+		mgmt.GET("/smartapi/analytics", s.mgmt.GetSmartAPIAnalytics)
 		mgmt.GET("/smartapi/keys/:id/reveal", s.mgmt.RevealSmartAPIKey)
 		mgmt.POST("/smartapi/keys", s.mgmt.PostSmartAPIKey)
 		mgmt.GET("/smartapi/settings", s.mgmt.GetSmartAPISettings)

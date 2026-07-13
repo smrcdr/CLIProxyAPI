@@ -3,6 +3,7 @@ package management
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -75,6 +76,57 @@ func (h *Handler) GetSmartAPIKeys(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"keys": h.smartAPIKeyViews()})
+}
+
+// GetSmartAPIAnalytics returns persistent token usage for a supported rolling window.
+func (h *Handler) GetSmartAPIAnalytics(c *gin.Context) {
+	if !h.smartAPIEnabled(c) {
+		return
+	}
+	windowName, window, ok := smartAPIAnalyticsWindow(c.Query("window"))
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "window must be one of: 30m, 1h, 12h, 24h"})
+		return
+	}
+	h.mu.Lock()
+	store := h.smartAPIUsage
+	h.mu.Unlock()
+	if store == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "usage analytics unavailable"})
+		return
+	}
+
+	snapshot := store.Snapshot(window, time.Now())
+	c.JSON(http.StatusOK, gin.H{
+		"window":                windowName,
+		"from":                  snapshot.From,
+		"to":                    snapshot.To,
+		"requests":              snapshot.Requests,
+		"successful":            snapshot.Successful(),
+		"failed":                snapshot.Failed,
+		"input_tokens":          snapshot.InputTokens,
+		"output_tokens":         snapshot.OutputTokens,
+		"cache_read_tokens":     snapshot.CacheReadTokens,
+		"cache_write_tokens":    snapshot.CacheCreationTokens,
+		"uncached_input_tokens": snapshot.UncachedInputTokens(),
+		"total_tokens":          snapshot.TotalTokens(),
+		"cache_hit_percent":     math.Round(snapshot.CacheHitPercent()*100) / 100,
+	})
+}
+
+func smartAPIAnalyticsWindow(value string) (string, time.Duration, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "1h":
+		return "1h", time.Hour, true
+	case "30m":
+		return "30m", 30 * time.Minute, true
+	case "12h":
+		return "12h", 12 * time.Hour, true
+	case "24h", "1d":
+		return "24h", 24 * time.Hour, true
+	default:
+		return "", 0, false
+	}
 }
 
 // RevealSmartAPIKey returns only the selected credential's raw API key.

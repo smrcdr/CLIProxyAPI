@@ -11,10 +11,13 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/smartapiusage"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
 )
@@ -218,6 +221,71 @@ func TestSmartAPIManagementOpenAICompatibilityKeys(t *testing.T) {
 	duplicate := performSmartAPIRequest(router, http.MethodPost, "/v0/management/smartapi/keys", map[string]any{"api_key": newKey}, "management-test-key")
 	if duplicate.Code != http.StatusConflict || len(cfg.OpenAICompatibility[0].APIKeyEntries) != 2 {
 		t.Fatalf("duplicate response = %d, entries = %d", duplicate.Code, len(cfg.OpenAICompatibility[0].APIKeyEntries))
+	}
+}
+
+func TestSmartAPIAnalyticsRollingWindow(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	now := time.Now().UTC()
+	store := smartapiusage.NewStore()
+	store.HandleUsage(context.Background(), coreusage.Record{
+		Provider:    "openai-compatible-opencode-go",
+		RequestedAt: now.Add(-10 * time.Minute),
+		Detail: coreusage.Detail{
+			InputTokens:         1000,
+			OutputTokens:        80,
+			CacheReadTokens:     750,
+			CacheCreationTokens: 40,
+		},
+	})
+	store.HandleUsage(context.Background(), coreusage.Record{
+		Provider:    "openai-compatible-opencode-go",
+		RequestedAt: now.Add(-2 * time.Hour),
+		Failed:      true,
+		Detail: coreusage.Detail{
+			InputTokens:     200,
+			OutputTokens:    10,
+			CacheReadTokens: 50,
+		},
+	})
+
+	handler := NewHandler(&config.Config{SmartManagementEnabled: true}, "", nil)
+	handler.smartAPIUsage = store
+	router := gin.New()
+	router.GET("/v0/management/smartapi/analytics", handler.GetSmartAPIAnalytics)
+
+	response := performSmartAPIRequest(router, http.MethodGet, "/v0/management/smartapi/analytics?window=30m", nil, "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("analytics status = %d: %s", response.Code, response.Body.String())
+	}
+	var analytics struct {
+		Window           string  `json:"window"`
+		Requests         int64   `json:"requests"`
+		Failed           int64   `json:"failed"`
+		InputTokens      int64   `json:"input_tokens"`
+		OutputTokens     int64   `json:"output_tokens"`
+		CacheReadTokens  int64   `json:"cache_read_tokens"`
+		CacheWriteTokens int64   `json:"cache_write_tokens"`
+		UncachedInput    int64   `json:"uncached_input_tokens"`
+		TotalTokens      int64   `json:"total_tokens"`
+		CacheHitPercent  float64 `json:"cache_hit_percent"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &analytics); err != nil {
+		t.Fatal(err)
+	}
+	if analytics.Window != "30m" || analytics.Requests != 1 || analytics.Failed != 0 {
+		t.Fatalf("analytics request totals = %#v", analytics)
+	}
+	if analytics.InputTokens != 1000 || analytics.OutputTokens != 80 || analytics.CacheReadTokens != 750 || analytics.CacheWriteTokens != 40 {
+		t.Fatalf("analytics token totals = %#v", analytics)
+	}
+	if analytics.UncachedInput != 250 || analytics.TotalTokens != 1080 || analytics.CacheHitPercent != 75 {
+		t.Fatalf("analytics derived totals = %#v", analytics)
+	}
+
+	invalid := performSmartAPIRequest(router, http.MethodGet, "/v0/management/smartapi/analytics?window=7d", nil, "")
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("invalid window status = %d, want 400", invalid.Code)
 	}
 }
 
