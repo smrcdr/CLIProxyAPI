@@ -15,7 +15,8 @@ services:
     ports:
       - "127.0.0.1:${HOST_PORT:-8322}:8317"
     volumes:
-      - ${RUNTIME_DIR:-../runtime}/config.yaml:/CLIProxyAPI/config.yaml:ro
+      # Smart Management persists key and settings changes to this file.
+      - ${RUNTIME_DIR:-../runtime}/config.yaml:/CLIProxyAPI/config.yaml:rw
       - ${RUNTIME_DIR:-../runtime}/auths:/root/.cli-proxy-api
       - ${RUNTIME_DIR:-../runtime}/logs:/CLIProxyAPI/logs
     networks:
