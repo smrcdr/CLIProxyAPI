@@ -85,6 +85,36 @@ debug: false
                 (["router-three"], "management-json"),
             )
 
+    def test_management_key_file_takes_precedence_over_hashed_config(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.yaml"
+            path.write_text(
+                json.dumps(
+                    {
+                        "remote-management": {"secret-key": "$2b$hashed-value"},
+                        "api-keys": ["router-one"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (path.parent / "management.key").write_text(
+                "management-plaintext\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                prepare.existing_runtime_secrets(path),
+                (["router-one"], "management-plaintext"),
+            )
+
+    def test_atomic_write_secret_uses_owner_only_permissions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "management.key"
+            prepare.atomic_write_secret(path, "management-plaintext")
+
+            self.assertEqual(path.read_text(encoding="utf-8"), "management-plaintext\n")
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
     def test_existing_openai_source_migrates_claude_runtime(self) -> None:
         existing_config = {
             "model-instructions": {

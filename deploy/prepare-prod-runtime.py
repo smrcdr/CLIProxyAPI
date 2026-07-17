@@ -81,14 +81,27 @@ def parse_yaml_scalar(value: str) -> str:
 
 
 def existing_runtime_secrets(config_path: Path) -> tuple[list[str], str | None]:
+    key_path = config_path.with_name("management.key")
+    file_management_key = (
+        key_path.read_text(encoding="utf-8").strip() if key_path.exists() else None
+    )
+    if file_management_key and file_management_key.startswith(
+        ("$2a$", "$2b$", "$2y$")
+    ):
+        raise ValueError("runtime/management.key must contain the plaintext management key")
     if not config_path.exists():
-        return [], None
+        return [], file_management_key
     config = read_runtime_config(config_path)
     if isinstance(config, dict):
         router_keys = require_secret_list(config.get("api-keys", []), "existing router keys")
         remote_management = config.get("remote-management")
         key = remote_management.get("secret-key") if isinstance(remote_management, dict) else None
-        return router_keys, key if isinstance(key, str) and key else None
+        config_management_key = key if isinstance(key, str) and key else None
+        if config_management_key and config_management_key.startswith(
+            ("$2a$", "$2b$", "$2y$")
+        ):
+            config_management_key = None
+        return router_keys, file_management_key or config_management_key
 
     router_keys: list[str] = []
     management_key: str | None = None
@@ -110,7 +123,9 @@ def existing_runtime_secrets(config_path: Path) -> tuple[list[str], str | None]:
                 value = parse_yaml_scalar(stripped.split(":", 1)[1])
                 if value:
                     management_key = value
-    return require_secret_list(router_keys, "existing router keys"), management_key
+    if management_key and management_key.startswith(("$2a$", "$2b$", "$2y$")):
+        management_key = None
+    return require_secret_list(router_keys, "existing router keys"), file_management_key or management_key
 
 
 def existing_openai_source(
@@ -268,6 +283,24 @@ def atomic_write(path: Path, value: dict[str, Any]) -> None:
         temporary_path.unlink(missing_ok=True)
 
 
+def atomic_write_secret(path: Path, value: str) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", dir=path.parent
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(value)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary_path, 0o600)
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
 def main() -> None:
     args = parse_args()
     swaper_config = read_json(args.swaper_dir / "data" / "config.json")
@@ -302,6 +335,7 @@ def main() -> None:
         )
     management_key = existing_management_key or secrets.token_urlsafe(48)
     config = build_config(swaper_config, upstream_keys, router_keys, management_key)
+    atomic_write_secret(args.runtime_dir / "management.key", management_key)
     atomic_write(config_path, config)
     print(
         f"Prepared {config_path} with {len(upstream_keys)} upstream credentials, "

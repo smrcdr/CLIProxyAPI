@@ -4,7 +4,7 @@ set -Eeuo pipefail
 local_port="${1:-8323}"
 remote_port="8322"
 ssh_host="prod"
-remote_config="/home/smarer/coding/SmartCLIProxy/runtime/config.yaml"
+remote_management_key="/home/smarer/coding/SmartCLIProxy/runtime/management.key"
 ssh_pid=""
 
 if [[ ! "$local_port" =~ ^[0-9]+$ ]] || (( local_port < 1 || local_port > 65535 )); then
@@ -24,7 +24,7 @@ copy_management_key() {
   local management_key
   management_key="$(
     ssh "$ssh_host" \
-      "python3 -c 'import json,pathlib,sys; config=json.loads(pathlib.Path(sys.argv[1]).read_text(encoding=\"utf-8\")); key=config.get(\"remote-management\",{}).get(\"secret-key\",\"\"); assert isinstance(key,str) and key,\"Management key is not configured\"; sys.stdout.write(key)' '$remote_config'"
+      "python3 -c 'import pathlib,sys; key=pathlib.Path(sys.argv[1]).read_text(encoding=\"utf-8\").strip(); assert key and not key.startswith((\"\u00242a\u0024\",\"\u00242b\u0024\",\"\u00242y\u0024\")),\"Plaintext management key is not configured\"; sys.stdout.write(key)' '$remote_management_key'"
   )"
 
   if command -v wl-copy >/dev/null 2>&1; then
