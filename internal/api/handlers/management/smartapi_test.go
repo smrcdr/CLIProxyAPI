@@ -58,6 +58,7 @@ func TestSmartAPIManagementAuthMaskRevealAndClone(t *testing.T) {
 	group.GET("/smartapi/keys", handler.GetSmartAPIKeys)
 	group.GET("/smartapi/keys/:id/reveal", handler.RevealSmartAPIKey)
 	group.POST("/smartapi/keys", handler.PostSmartAPIKey)
+	group.DELETE("/smartapi/keys/:id", handler.DeleteSmartAPIKey)
 	group.GET("/smartapi/settings", handler.GetSmartAPISettings)
 	group.PUT("/smartapi/settings", handler.PutSmartAPISettings)
 
@@ -95,6 +96,28 @@ func TestSmartAPIManagementAuthMaskRevealAndClone(t *testing.T) {
 	duplicate := performSmartAPIRequest(router, http.MethodPost, "/v0/management/smartapi/keys", map[string]any{"api_key": newKey}, "management-test-key")
 	if duplicate.Code != http.StatusConflict || len(cfg.ClaudeKey) != 2 {
 		t.Fatalf("duplicate response = %d, keys = %d", duplicate.Code, len(cfg.ClaudeKey))
+	}
+	unauthorizedDelete := performSmartAPIRequest(router, http.MethodDelete, "/v0/management/smartapi/keys/"+smartAPIKeyID(newKey), nil, "")
+	if unauthorizedDelete.Code != http.StatusUnauthorized || len(cfg.ClaudeKey) != 2 {
+		t.Fatalf("unauthorized delete = %d, keys = %d", unauthorizedDelete.Code, len(cfg.ClaudeKey))
+	}
+	deleted := performSmartAPIRequest(router, http.MethodDelete, "/v0/management/smartapi/keys/"+smartAPIKeyID(newKey), nil, "management-test-key")
+	if deleted.Code != http.StatusOK || len(cfg.ClaudeKey) != 1 {
+		t.Fatalf("delete response = %d %s, keys = %d", deleted.Code, deleted.Body.String(), len(cfg.ClaudeKey))
+	}
+	if cfg.ClaudeKey[0].APIKey != template.APIKey {
+		t.Fatalf("delete removed the wrong key: %#v", cfg.ClaudeKey)
+	}
+	persisted, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(persisted), newKey) {
+		t.Fatalf("deleted key remains in config: %s", persisted)
+	}
+	missing := performSmartAPIRequest(router, http.MethodDelete, "/v0/management/smartapi/keys/"+smartAPIKeyID(newKey), nil, "management-test-key")
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("second delete status = %d, want 404", missing.Code)
 	}
 
 	toggle := performSmartAPIRequest(router, http.MethodPut, "/v0/management/smartapi/settings", map[string]any{"strip_reasoning": true}, "management-test-key")
@@ -174,6 +197,7 @@ func TestSmartAPIManagementOpenAICompatibilityKeys(t *testing.T) {
 	group.GET("/smartapi/keys", handler.GetSmartAPIKeys)
 	group.GET("/smartapi/keys/:id/reveal", handler.RevealSmartAPIKey)
 	group.POST("/smartapi/keys", handler.PostSmartAPIKey)
+	group.DELETE("/smartapi/keys/:id", handler.DeleteSmartAPIKey)
 
 	list := performSmartAPIRequest(router, http.MethodGet, "/v0/management/smartapi/keys", nil, "management-test-key")
 	if list.Code != http.StatusOK {
@@ -221,6 +245,17 @@ func TestSmartAPIManagementOpenAICompatibilityKeys(t *testing.T) {
 	duplicate := performSmartAPIRequest(router, http.MethodPost, "/v0/management/smartapi/keys", map[string]any{"api_key": newKey}, "management-test-key")
 	if duplicate.Code != http.StatusConflict || len(cfg.OpenAICompatibility[0].APIKeyEntries) != 2 {
 		t.Fatalf("duplicate response = %d, entries = %d", duplicate.Code, len(cfg.OpenAICompatibility[0].APIKeyEntries))
+	}
+
+	deleted := performSmartAPIRequest(router, http.MethodDelete, "/v0/management/smartapi/keys/"+smartAPIKeyID(newKey), nil, "management-test-key")
+	if deleted.Code != http.StatusOK || len(cfg.OpenAICompatibility[0].APIKeyEntries) != 1 {
+		t.Fatalf("delete response = %d %s, entries = %d", deleted.Code, deleted.Body.String(), len(cfg.OpenAICompatibility[0].APIKeyEntries))
+	}
+	if cfg.OpenAICompatibility[0].APIKeyEntries[0].APIKey != existingKey {
+		t.Fatalf("delete removed the wrong API key entry: %#v", cfg.OpenAICompatibility[0].APIKeyEntries)
+	}
+	if !reflect.DeepEqual(cfg.OpenAICompatibility[0].Models, provider.Models) || !reflect.DeepEqual(cfg.OpenAICompatibility[0].Headers, provider.Headers) {
+		t.Fatal("deleting an API key changed provider models or headers")
 	}
 }
 

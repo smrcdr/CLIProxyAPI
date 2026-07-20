@@ -744,6 +744,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/smartapi/analytics", s.mgmt.GetSmartAPIAnalytics)
 		mgmt.GET("/smartapi/keys/:id/reveal", s.mgmt.RevealSmartAPIKey)
 		mgmt.POST("/smartapi/keys", s.mgmt.PostSmartAPIKey)
+		mgmt.DELETE("/smartapi/keys/:id", s.mgmt.DeleteSmartAPIKey)
 		mgmt.GET("/smartapi/settings", s.mgmt.GetSmartAPISettings)
 		mgmt.PUT("/smartapi/settings", s.mgmt.PutSmartAPISettings)
 		mgmt.GET("/usage-queue", s.mgmt.GetUsageQueue)

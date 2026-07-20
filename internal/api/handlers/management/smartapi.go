@@ -244,6 +244,62 @@ func (h *Handler) PostSmartAPIKey(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"id": smartAPIKeyID(apiKey), "masked_key": maskSmartAPIKey(apiKey), "status": "created"})
 }
 
+// DeleteSmartAPIKey atomically removes the selected OpenCode Go credential.
+func (h *Handler) DeleteSmartAPIKey(c *gin.Context) {
+	if !h.smartAPIEnabled(c) {
+		return
+	}
+	id := strings.TrimSpace(c.Param("id"))
+	if id == "" {
+		c.JSON(http.StatusNotFound, gin.H{"error": "key not found"})
+		return
+	}
+
+	h.mu.Lock()
+	previousConfig := h.cfg.CloneForRuntime()
+	removed := false
+	for i := range h.cfg.OpenAICompatibility {
+		provider := &h.cfg.OpenAICompatibility[i]
+		if !isOpenCodeGoBaseURL(provider.BaseURL) {
+			continue
+		}
+		entries := provider.APIKeyEntries[:0]
+		for _, entry := range provider.APIKeyEntries {
+			if smartAPIKeyID(entry.APIKey) == id {
+				removed = true
+				continue
+			}
+			entries = append(entries, entry)
+		}
+		provider.APIKeyEntries = entries
+	}
+	claudeKeys := h.cfg.ClaudeKey[:0]
+	for _, entry := range h.cfg.ClaudeKey {
+		if isOpenCodeGoCredential(entry) && smartAPIKeyID(entry.APIKey) == id {
+			removed = true
+			continue
+		}
+		claudeKeys = append(claudeKeys, entry)
+	}
+	h.cfg.ClaudeKey = claudeKeys
+	if !removed {
+		h.mu.Unlock()
+		c.JSON(http.StatusNotFound, gin.H{"error": "key not found"})
+		return
+	}
+	if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
+		h.cfg.OpenAICompatibility = previousConfig.OpenAICompatibility
+		h.cfg.ClaudeKey = previousConfig.ClaudeKey
+		h.mu.Unlock()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete key"})
+		return
+	}
+	snapshot := h.reloadSnapshotConfigLocked()
+	h.mu.Unlock()
+	h.reloadConfigAfterManagementSave(c.Request.Context(), snapshot)
+	c.JSON(http.StatusOK, gin.H{"id": id, "status": "deleted"})
+}
+
 func (h *Handler) GetSmartAPISettings(c *gin.Context) {
 	if !h.smartAPIEnabled(c) {
 		return
