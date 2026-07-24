@@ -2375,6 +2375,9 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		if errors.Is(errExec, context.DeadlineExceeded) {
 			break
 		}
+		if isImageGenerationExecution(opts) && !isExplicitImageCredentialFailure(errExec) {
+			break
+		}
 		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, retryModel, maxWait)
 		if !shouldRetry {
 			break
@@ -2668,6 +2671,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				m.MarkResult(execCtx, result)
 				logCredentialAttemptFailure(execCtx, len(attempted), auth.ID, errExec)
 				retry, generic := retryAcrossCredential(errExec, generic5xxFailures)
+				if isImageGenerationExecution(execOpts) {
+					retry = isExplicitImageCredentialFailure(errExec)
+					generic = false
+				}
 				if generic {
 					generic5xxFailures++
 				}
@@ -2692,6 +2699,23 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			}
 			continue
 		}
+	}
+}
+
+func isImageGenerationExecution(opts cliproxyexecutor.Options) bool {
+	if opts.Metadata == nil {
+		return false
+	}
+	path, _ := opts.Metadata[cliproxyexecutor.RequestPathMetadataKey].(string)
+	return strings.EqualFold(strings.TrimSpace(path), "/v1/images/generations")
+}
+
+func isExplicitImageCredentialFailure(err error) bool {
+	switch statusCodeFromError(err) {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests:
+		return true
+	default:
+		return false
 	}
 }
 

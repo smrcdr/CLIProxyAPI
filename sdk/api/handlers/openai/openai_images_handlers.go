@@ -1149,6 +1149,7 @@ func (h *OpenAIAPIHandler) collectRoutedImages(c *gin.Context, imageReq []byte, 
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	cliCtx = handlers.WithDisallowFreeAuth(cliCtx)
+	cliCtx, selectedFingerprint := handlers.WithCodexAccountFingerprint(cliCtx)
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 
 	model := strings.TrimSpace(imageModel)
@@ -1165,6 +1166,7 @@ func (h *OpenAIAPIHandler) collectRoutedImages(c *gin.Context, imageReq []byte, 
 	}
 
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+	handlers.WriteCodexAccountFingerprint(c.Writer.Header(), selectedFingerprint)
 	_, _ = c.Writer.Write(resp)
 	cliCancel(nil)
 }
@@ -1398,6 +1400,7 @@ func (h *OpenAIAPIHandler) collectImagesWithModel(c *gin.Context, imageReq []byt
 	c.Header("Content-Type", "application/json")
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	cliCtx, selectedFingerprint := handlers.WithCodexAccountFingerprint(cliCtx)
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 
 	model = strings.TrimSpace(model)
@@ -1422,6 +1425,7 @@ func (h *OpenAIAPIHandler) collectImagesWithModel(c *gin.Context, imageReq []byt
 	}
 
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+	handlers.WriteCodexAccountFingerprint(c.Writer.Header(), selectedFingerprint)
 	_, _ = c.Writer.Write(out)
 	cliCancel(nil)
 }

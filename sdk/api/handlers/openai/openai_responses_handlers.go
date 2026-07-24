@@ -423,6 +423,7 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 	c.Header("Content-Type", "application/json")
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	cliCtx, selectedFingerprint := handlers.WithCodexAccountFingerprint(cliCtx)
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "responses/compact")
 	stopKeepAlive()
@@ -432,6 +433,7 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 		return
 	}
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+	handlers.WriteCodexAccountFingerprint(c.Writer.Header(), selectedFingerprint)
 	_, _ = c.Writer.Write(resp)
 	cliCancel()
 }
@@ -448,6 +450,7 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, r
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	cliCtx, selectedFingerprint := handlers.WithCodexAccountFingerprint(cliCtx)
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
@@ -458,6 +461,7 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, r
 		return
 	}
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+	handlers.WriteCodexAccountFingerprint(c.Writer.Header(), selectedFingerprint)
 	_, _ = c.Writer.Write(resp)
 	cliCancel()
 }
@@ -485,6 +489,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	// New core execution path
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	cliCtx, selectedFingerprint := handlers.WithCodexAccountFingerprint(cliCtx)
 	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
 
 	setSSEHeaders := func() {
@@ -520,6 +525,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 				// Stream closed without data? Send headers and done.
 				setSSEHeaders()
 				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+				handlers.WriteCodexAccountFingerprint(c.Writer.Header(), selectedFingerprint)
 				_, _ = c.Writer.Write([]byte("\n"))
 				flusher.Flush()
 				cliCancel(nil)
@@ -529,6 +535,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			// Success! Set headers.
 			setSSEHeaders()
 			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+			handlers.WriteCodexAccountFingerprint(c.Writer.Header(), selectedFingerprint)
 
 			// Write first chunk logic (matching forwardResponsesStream)
 			framer.WriteChunk(c.Writer, chunk)

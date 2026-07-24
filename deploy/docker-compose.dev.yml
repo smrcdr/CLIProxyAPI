@@ -12,6 +12,8 @@ services:
     image: smart-cli-proxy:dev
     container_name: cliproxyapi-dev
     restart: unless-stopped
+    env_file:
+      - ${RUNTIME_DIR:-../runtime}/service.env
     ports:
       - "127.0.0.1:8322:8317"
     volumes:

@@ -62,6 +62,12 @@ type Handler struct {
 	smartAPIUsage           *smartapiusage.Store
 	pluginReleaseCacheMu    sync.Mutex
 	pluginReleaseCache      map[string]pluginReleaseCacheEntry
+	codexAccountMu          sync.RWMutex
+	codexRefreshLocks       map[string]*sync.Mutex
+	codexQuota              map[string]codexQuotaSnapshot
+	codexDeviceSessions     map[string]*codexDeviceSession
+	codexFingerprintSecret  []byte
+	codexPollerOnce         sync.Once
 }
 
 type configReloadSnapshot struct {
@@ -83,6 +89,12 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
 		smartAPIUsage:       smartapiusage.DefaultStore(),
+		codexRefreshLocks:   make(map[string]*sync.Mutex),
+		codexQuota:          make(map[string]codexQuotaSnapshot),
+		codexDeviceSessions: make(map[string]*codexDeviceSession),
+		codexFingerprintSecret: []byte(strings.TrimSpace(
+			os.Getenv("CODEX_ACCOUNT_FINGERPRINT_SECRET"),
+		)),
 	}
 	h.startAttemptCleanup()
 	return h

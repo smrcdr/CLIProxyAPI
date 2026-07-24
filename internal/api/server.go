@@ -675,6 +675,7 @@ func (s *Server) registerManagementRoutes() {
 	}
 
 	log.Info("management routes registered after secret key configuration")
+	s.mgmt.StartCodexQuotaPoller(context.Background())
 
 	s.engine.POST("/v0/management/oauth-callback", s.managementAvailabilityMiddleware(), s.mgmt.PostOAuthCallback)
 	s.engine.GET("/v0/management/oauth-callback", s.managementAvailabilityMiddleware(), s.mgmt.GetOAuthCallback)
@@ -724,6 +725,16 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.DELETE("/proxy-url", s.mgmt.DeleteProxyURL)
 
 		mgmt.POST("/api-call", s.mgmt.APICall)
+		mgmt.GET("/codex-accounts", s.mgmt.ListCodexAccounts)
+		mgmt.POST("/codex-accounts/import", s.mgmt.ImportCodexAccounts)
+		mgmt.PATCH("/codex-accounts/:fingerprint", s.mgmt.PatchCodexAccount)
+		mgmt.PATCH("/codex-accounts/:fingerprint/status", s.mgmt.PatchCodexAccountStatus)
+		mgmt.DELETE("/codex-accounts/:fingerprint", s.mgmt.DeleteCodexAccount)
+		mgmt.POST("/codex-accounts/:fingerprint/quota/refresh", s.mgmt.RefreshCodexAccountQuota)
+		mgmt.POST("/codex-accounts/quota/refresh", s.mgmt.RefreshAllCodexAccountQuotas)
+		mgmt.POST("/codex-device-sessions", s.mgmt.CreateCodexDeviceSession)
+		mgmt.GET("/codex-device-sessions/:id", s.mgmt.GetCodexDeviceSession)
+		mgmt.DELETE("/codex-device-sessions/:id", s.mgmt.DeleteCodexDeviceSession)
 
 		mgmt.GET("/quota-exceeded/switch-project", s.mgmt.GetSwitchProject)
 		mgmt.PUT("/quota-exceeded/switch-project", s.mgmt.PutSwitchProject)
