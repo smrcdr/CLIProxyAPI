@@ -12,6 +12,8 @@ services:
     image: smart-cli-proxy:prod
     container_name: smart-cli-proxy-prod
     restart: unless-stopped
+    env_file:
+      - ${RUNTIME_DIR:-../runtime}/service.env
     ports:
       - "127.0.0.1:${HOST_PORT:-8322}:8317"
     volumes:

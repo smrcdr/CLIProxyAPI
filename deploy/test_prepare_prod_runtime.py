@@ -115,6 +115,44 @@ debug: false
             self.assertEqual(path.read_text(encoding="utf-8"), "management-plaintext\n")
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
+    def test_prepare_service_env_preserves_existing_secret_and_values(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "service.env"
+            path.write_text(
+                "OTHER_SETTING=kept\n"
+                "CODEX_ACCOUNT_FINGERPRINT_SECRET=0123456789abcdef\n",
+                encoding="utf-8",
+            )
+
+            secret = prepare.prepare_service_env(path)
+
+            self.assertEqual(secret, "0123456789abcdef")
+            self.assertEqual(
+                path.read_text(encoding="utf-8"),
+                "OTHER_SETTING=kept\n"
+                "CODEX_ACCOUNT_FINGERPRINT_SECRET=0123456789abcdef\n",
+            )
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_prepare_service_env_replaces_short_or_duplicate_secrets(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "service.env"
+            path.write_text(
+                "CODEX_ACCOUNT_FINGERPRINT_SECRET=short\n"
+                "CODEX_ACCOUNT_FINGERPRINT_SECRET=duplicate\n",
+                encoding="utf-8",
+            )
+
+            secret = prepare.prepare_service_env(path)
+            content = path.read_text(encoding="utf-8")
+
+            self.assertGreaterEqual(len(secret), 16)
+            self.assertEqual(
+                content.count("CODEX_ACCOUNT_FINGERPRINT_SECRET="),
+                1,
+            )
+            self.assertIn(f"CODEX_ACCOUNT_FINGERPRINT_SECRET={secret}\n", content)
+
     def test_existing_openai_source_migrates_claude_runtime(self) -> None:
         existing_config = {
             "model-instructions": {

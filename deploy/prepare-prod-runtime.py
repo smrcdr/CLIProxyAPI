@@ -26,6 +26,8 @@ NATIVE_MODELS = (
     "minimax-m3",
 )
 
+CODEX_FINGERPRINT_ENV = "CODEX_ACCOUNT_FINGERPRINT_SECRET"
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -301,6 +303,24 @@ def atomic_write_secret(path: Path, value: str) -> None:
         temporary_path.unlink(missing_ok=True)
 
 
+def prepare_service_env(path: Path) -> str:
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    secret = ""
+    preserved: list[str] = []
+    prefix = f"{CODEX_FINGERPRINT_ENV}="
+    for line in lines:
+        if line.startswith(prefix):
+            if not secret:
+                secret = parse_yaml_scalar(line.split("=", 1)[1])
+            continue
+        preserved.append(line)
+    if len(secret) < 16:
+        secret = secrets.token_urlsafe(32)
+    preserved.append(f"{prefix}{secret}")
+    atomic_write_secret(path, "\n".join(preserved))
+    return secret
+
+
 def main() -> None:
     args = parse_args()
     swaper_config = read_json(args.swaper_dir / "data" / "config.json")
@@ -336,6 +356,7 @@ def main() -> None:
     management_key = existing_management_key or secrets.token_urlsafe(48)
     config = build_config(swaper_config, upstream_keys, router_keys, management_key)
     atomic_write_secret(args.runtime_dir / "management.key", management_key)
+    prepare_service_env(args.runtime_dir / "service.env")
     atomic_write(config_path, config)
     print(
         f"Prepared {config_path} with {len(upstream_keys)} upstream credentials, "
