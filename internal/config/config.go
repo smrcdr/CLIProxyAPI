@@ -29,6 +29,13 @@ const (
 // Config represents the application's configuration, loaded from a YAML file.
 type Config struct {
 	SDKConfig `yaml:",inline"`
+	// ServiceRole selects the runtime responsibility for this process.
+	// Empty values are normalized to "combined" for backward compatibility.
+	ServiceRole ServiceRole `yaml:"service-role,omitempty" json:"service-role"`
+	// PoolKind identifies the account-pool implementation when ServiceRole is "pool".
+	PoolKind string `yaml:"pool-kind,omitempty" json:"pool-kind,omitempty"`
+	// Router configures upstream and model-group routing for router-capable roles.
+	Router RouterConfig `yaml:"router,omitempty" json:"router"`
 	// SmartManagementEnabled exposes the embedded SmartAPI management page and endpoints.
 	// Access to API endpoints is still protected by the management key middleware.
 	SmartManagementEnabled bool `yaml:"smart-management-enabled" json:"smart-management-enabled"`
@@ -723,6 +730,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 				// Missing and optional: return empty config (cloud deploy standby).
 				cfg := &Config{}
 				cfg.NormalizePluginsConfig()
+				if errRouter := finalizeRouterConfig(cfg, true); errRouter != nil {
+					return nil, errRouter
+				}
 				return cfg, nil
 			}
 		}
@@ -733,6 +743,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	if optional && len(data) == 0 {
 		cfg := &Config{}
 		cfg.NormalizePluginsConfig()
+		if errRouter := finalizeRouterConfig(cfg, true); errRouter != nil {
+			return nil, errRouter
+		}
 		return cfg, nil
 	}
 
@@ -758,6 +771,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
 			cfgOptional := &Config{}
 			cfgOptional.NormalizePluginsConfig()
+			if errRouter := finalizeRouterConfig(cfgOptional, true); errRouter != nil {
+				return nil, errRouter
+			}
 			return cfgOptional, nil
 		}
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
@@ -840,6 +856,10 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()
+
+	if errRouter := finalizeRouterConfig(&cfg, true); errRouter != nil {
+		return nil, errRouter
+	}
 
 	// Return the populated configuration struct.
 	return &cfg, nil
@@ -1509,6 +1529,8 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 			return node.Value == "plugins"
 		case "routing.strategy":
 			return node.Value == "round-robin"
+		case "service-role":
+			return node.Value == string(ServiceRoleCombined)
 		}
 	}
 

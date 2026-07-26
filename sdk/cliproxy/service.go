@@ -22,6 +22,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/smartrouter"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/diff"
@@ -99,6 +100,12 @@ type Service struct {
 
 	// pluginHost owns dynamic plugin lifecycle and runtime capability adapters.
 	pluginHost *pluginhost.Host
+
+	// routerSnapshots holds immutable model-routing configuration revisions.
+	routerSnapshots *smartrouter.SnapshotStore
+
+	// routerSelector owns request-scoped scheduling and route circuit state.
+	routerSelector *smartrouter.Selector
 
 	// shutdownOnce ensures shutdown is called only once.
 	shutdownOnce sync.Once
@@ -1281,6 +1288,18 @@ func (s *Service) applyConfigUpdateWithAuthSynthesis(newCfg *config.Config, synt
 		return
 	}
 
+	nextRouterRevision := uint64(1)
+	if s.routerSnapshots != nil {
+		if current := s.routerSnapshots.Load(); current != nil {
+			nextRouterRevision = current.Revision() + 1
+		}
+	}
+	nextRouterSnapshot, errRouterSnapshot := smartrouter.CompileSnapshot(newCfg, nextRouterRevision)
+	if errRouterSnapshot != nil {
+		log.WithError(errRouterSnapshot).Error("rejected invalid router configuration update")
+		return
+	}
+
 	nextStrategy := strings.ToLower(strings.TrimSpace(newCfg.Routing.Strategy))
 	normalizeStrategy := func(strategy string) string {
 		switch strategy {
@@ -1343,6 +1362,20 @@ func (s *Service) applyConfigUpdateWithAuthSynthesis(newCfg *config.Config, synt
 	s.applyPprofConfig(newCfg)
 	if s.server != nil {
 		s.server.UpdateClients(newCfg)
+	}
+	if s.routerSelector != nil {
+		if errSwap := s.routerSelector.SwapSnapshot(nextRouterSnapshot); errSwap != nil {
+			log.WithError(errSwap).Error("failed to swap router configuration snapshot")
+			return
+		}
+	} else if s.routerSnapshots == nil {
+		s.routerSnapshots = smartrouter.NewSnapshotStore(nextRouterSnapshot)
+	} else if errSwap := s.routerSnapshots.Swap(nextRouterSnapshot); errSwap != nil {
+		log.WithError(errSwap).Error("failed to swap router configuration snapshot")
+		return
+	}
+	if s.routerSelector == nil {
+		s.routerSelector = smartrouter.NewSelector(s.routerSnapshots, nil)
 	}
 	s.cfgMu.Lock()
 	s.cfg = newCfg

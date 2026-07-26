@@ -5,6 +5,48 @@ host: ""
 # Server port
 port: 8317
 
+# Runtime responsibility. Existing deployments default to "combined".
+# Production SmartAPI deployments should explicitly use "router" or "pool".
+service-role: combined
+# pool-kind: codex # Required only when service-role is "pool".
+
+# SmartRouter registry. A pool deployment must not define this section.
+# router:
+#   upstreams:
+#     - id: codex-pool-eu
+#       name: Codex pool EU
+#       enabled: true
+#       protocol: openai-responses
+#       base-url: "http://codex-pool:8317/v1"
+#       auth:
+#         type: bearer
+#         secret-ref: upstream/codex-pool-eu
+#       capabilities:
+#         endpoints: [responses]
+#         streaming: true
+#         tools: true
+#         vision-input: true
+#       health-check:
+#         mode: http
+#         path: /healthz
+#         interval: 30s
+#         unhealthy-threshold: 3
+#         healthy-threshold: 2
+#       forward-smartapi-affinity: true
+#   model-groups:
+#     - id: gpt-5-6-sol
+#       public-model: gpt-5.6-sol
+#       capability: text
+#       selection:
+#         strategy: weighted-affinity
+#         affinity-ttl: 720h
+#       routes:
+#         - id: gpt-5-6-sol-codex-primary
+#           upstream-id: codex-pool-eu
+#           upstream-model: gpt-5.6-sol
+#           priority: 100
+#           weight: 100
+
 # TLS settings for HTTPS. When enabled, the server listens with the provided certificate and key.
 tls:
   enable: false

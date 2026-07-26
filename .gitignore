@@ -31,6 +31,8 @@ auths/*
 
 # Documentation
 docs/*
+!docs/smart-router-v1.md
+!docs/smart-router-implementation-plan.md
 AGENTS.md
 CLAUDE.md
 GEMINI.md

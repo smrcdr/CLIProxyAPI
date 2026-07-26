@@ -13,6 +13,7 @@ import (
 	configaccess "github.com/router-for-me/CLIProxyAPI/v7/internal/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/smartrouter"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
@@ -188,6 +189,13 @@ func (b *Builder) Build() (*Service, error) {
 	if b.configPath == "" {
 		return nil, fmt.Errorf("cliproxy: configuration path is required")
 	}
+	if err := b.cfg.NormalizeAndValidateRouter(); err != nil {
+		return nil, fmt.Errorf("cliproxy: %w", err)
+	}
+	routerSnapshot, errRouterSnapshot := smartrouter.CompileSnapshot(b.cfg, 1)
+	if errRouterSnapshot != nil {
+		return nil, fmt.Errorf("cliproxy: %w", errRouterSnapshot)
+	}
 
 	tokenProvider := b.tokenProvider
 	if tokenProvider == nil {
@@ -280,18 +288,21 @@ func (b *Builder) Build() (*Service, error) {
 		coreManager.SetPluginScheduler(pluginHost)
 	}
 
+	routerSnapshots := smartrouter.NewSnapshotStore(routerSnapshot)
 	service := &Service{
-		cfg:            b.cfg,
-		configPath:     b.configPath,
-		tokenProvider:  tokenProvider,
-		apiKeyProvider: apiKeyProvider,
-		watcherFactory: watcherFactory,
-		hooks:          b.hooks,
-		authManager:    authManager,
-		accessManager:  accessManager,
-		coreManager:    coreManager,
-		pluginHost:     pluginHost,
-		serverOptions:  append([]api.ServerOption(nil), b.serverOptions...),
+		cfg:             b.cfg,
+		configPath:      b.configPath,
+		tokenProvider:   tokenProvider,
+		apiKeyProvider:  apiKeyProvider,
+		watcherFactory:  watcherFactory,
+		hooks:           b.hooks,
+		authManager:     authManager,
+		accessManager:   accessManager,
+		coreManager:     coreManager,
+		pluginHost:      pluginHost,
+		routerSnapshots: routerSnapshots,
+		routerSelector:  smartrouter.NewSelector(routerSnapshots, nil),
+		serverOptions:   append([]api.ServerOption(nil), b.serverOptions...),
 	}
 	if b.postAuthHook != nil {
 		service.serverOptions = append(service.serverOptions, api.WithPostAuthHook(b.postAuthHook))
