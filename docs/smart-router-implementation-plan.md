@@ -152,8 +152,8 @@ after Phase 3 contracts are stable. Their integration tests remain sequential.
 | --- | --- | --- | --- |
 | 1 | Done | None | Roles, validated config, immutable snapshots |
 | 2 | Done | 1 | Request plans, weighted selection, circuits |
-| 3 | Next | 2 | Non-stream route attempts and safe failover |
-| 4 | Pending | 3 | Commit-aware streaming failover |
+| 3 | Done | 2 | Non-stream route attempts and safe failover |
+| 4 | Next | 3 | Commit-aware streaming failover |
 | 5 | Pending | 3, 4 | Existing runtime bridge, conversion, usage |
 | 6 | Pending | 5 | Safe image generation routing |
 | 7 | Pending | 5 | Management API, revisions, encrypted secrets |
@@ -200,7 +200,35 @@ upstream service, never an upstream account.
 
 ## 9. Phase 3: Non-stream execution coordinator
 
-Status: Next
+Status: Done
+
+Delivered:
+
+- `Coordinator` in `internal/smartrouter/coordinator.go` executing one
+  `RequestPlan` route by route through the injected `AttemptExecutor`
+  interface, with `AttemptRequest`/`AttemptResponse` DTOs (the name
+  `AttemptResult` was already taken by the circuit layer).
+- Endpoint and stream-mode validation before the first `Next()` call, plus
+  `ExecutionPolicyFor(capability, stream)`; only the text non-stream policy
+  exists so far, streaming/image combinations return
+  `ErrExecutionPolicyUnavailable`.
+- Full text non-stream retry matrix, including malformed-2xx protocol failures
+  capped at one protocol failover and terminal handling for every unlisted
+  status.
+- `ParseRetryAfter` in `internal/smartrouter/retry_after.go` for delta-seconds
+  and HTTP-date forms.
+- Client cancellation takes precedence over executor results; an admitted but
+  never-executed selection is abandoned (probe released), so every selection
+  gets exactly one `Report` or `Abandon`.
+- Sanitized `ExecutionResult`/`AttemptRecord`/`ExecutionError` diagnostics:
+  IDs, status codes, and failure categories only — no headers, bodies, or
+  error snippets. The successful upstream response is returned separately as a
+  defensive copy.
+
+Handoff notes for Phase 4/5: the coordinator is wired to nothing yet; build the
+streaming policy as a new `ExecutionPolicyFor` branch and inject a real
+executor from the runtime bridge without moving credentials into
+`internal/smartrouter`.
 
 ### 9.1 Goal
 
