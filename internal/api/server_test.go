@@ -17,6 +17,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/smartrouter"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -199,6 +200,97 @@ func TestRouterRoleHidesLocalCredentialManagementAndOAuthRoutes(t *testing.T) {
 		server.engine.ServeHTTP(recorder, request)
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("%s status = %d, want 200 body=%s", path, recorder.Code, recorder.Body.String())
+		}
+	}
+}
+
+func TestRouterRoleModelsListUsesModelGroups(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	directory := t.TempDir()
+	cfg := &proxyconfig.Config{
+		SDKConfig:   sdkconfig.SDKConfig{APIKeys: []string{"test-key"}},
+		ServiceRole: proxyconfig.ServiceRoleRouter,
+		AuthDir:     filepath.Join(directory, "auth"),
+		Router: proxyconfig.RouterConfig{
+			Upstreams: []proxyconfig.RouterUpstream{{
+				ID:       "primary",
+				Name:     "Primary",
+				Protocol: proxyconfig.RouterProtocolOpenAIResponses,
+				BaseURL:  "https://primary.example/v1",
+				Capabilities: proxyconfig.RouterCapabilities{
+					Endpoints: []string{proxyconfig.RouterEndpointResponses},
+				},
+			}},
+			ModelGroups: []proxyconfig.RouterModelGroup{
+				{
+					ID:          "model-b",
+					PublicModel: "model-b",
+					Capability:  proxyconfig.RouterCapabilityText,
+					Routes: []proxyconfig.RouterRoute{{
+						ID:            "model-b-primary",
+						UpstreamID:    "primary",
+						UpstreamModel: "upstream-b",
+						Weight:        1,
+					}},
+				},
+				{
+					ID:          "model-a",
+					PublicModel: "model-a",
+					Capability:  proxyconfig.RouterCapabilityText,
+					Routes: []proxyconfig.RouterRoute{{
+						ID:            "model-a-primary",
+						UpstreamID:    "primary",
+						UpstreamModel: "upstream-a",
+						Weight:        1,
+					}},
+				},
+			},
+		},
+	}
+	if err := os.MkdirAll(cfg.AuthDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll(auth) error = %v", err)
+	}
+	snapshot, err := smartrouter.CompileSnapshot(cfg, 1)
+	if err != nil {
+		t.Fatalf("CompileSnapshot() error = %v", err)
+	}
+	selector := smartrouter.NewSelector(smartrouter.NewSnapshotStore(snapshot), nil)
+	server := NewServer(
+		cfg,
+		auth.NewManager(nil, nil, nil),
+		sdkaccess.NewManager(),
+		filepath.Join(directory, "config.yaml"),
+		WithSmartRouterSelector(selector),
+	)
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	request.Header.Set("Authorization", "Bearer test-key")
+	recorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Object string `json:"object"`
+		Data   []struct {
+			ID      string `json:"id"`
+			Object  string `json:"object"`
+			OwnedBy string `json:"owned_by"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("Unmarshal() error = %v body=%s", err, recorder.Body.String())
+	}
+	if response.Object != "list" || len(response.Data) != 2 {
+		t.Fatalf("response = %#v", response)
+	}
+	if response.Data[0].ID != "model-a" || response.Data[1].ID != "model-b" {
+		t.Fatalf("model order = %#v", response.Data)
+	}
+	for _, model := range response.Data {
+		if model.Object != "model" || model.OwnedBy != "smart-router" {
+			t.Fatalf("model = %#v", model)
 		}
 	}
 }

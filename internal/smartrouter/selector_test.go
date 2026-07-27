@@ -151,6 +151,52 @@ func TestRequestPlanPinsSnapshotRevision(t *testing.T) {
 	}
 }
 
+func TestPublicModelsReturnsOnlyStaticallyRoutableGroups(t *testing.T) {
+	cfg := selectorTestConfig(config.RouterSelectionWeightedRoundRobin, 1, 1)
+	disabled := false
+	cfg.Router.Upstreams = append(cfg.Router.Upstreams, config.RouterUpstream{
+		ID:       "disabled",
+		Name:     "Disabled",
+		Enabled:  &disabled,
+		Protocol: config.RouterProtocolOpenAIResponses,
+		BaseURL:  "https://disabled.example/v1",
+		Capabilities: config.RouterCapabilities{
+			Endpoints: []string{config.RouterEndpointResponses},
+		},
+	})
+	cfg.Router.ModelGroups = append(cfg.Router.ModelGroups,
+		config.RouterModelGroup{
+			ID:          "model-disabled",
+			PublicModel: "model-disabled",
+			Enabled:     &disabled,
+			Capability:  config.RouterCapabilityText,
+			Routes: []config.RouterRoute{{
+				ID:            "route-disabled-model",
+				UpstreamID:    "upstream-a",
+				UpstreamModel: "upstream-disabled",
+				Weight:        1,
+			}},
+		},
+		config.RouterModelGroup{
+			ID:          "model-z",
+			PublicModel: "model-z",
+			Capability:  config.RouterCapabilityText,
+			Routes: []config.RouterRoute{{
+				ID:            "route-disabled-upstream",
+				UpstreamID:    "disabled",
+				UpstreamModel: "upstream-z",
+				Weight:        1,
+			}},
+		},
+	)
+	selector := selectorForConfig(t, cfg)
+
+	models := selector.PublicModels()
+	if len(models) != 1 || models[0] != "model-a" {
+		t.Fatalf("PublicModels() = %v, want [model-a]", models)
+	}
+}
+
 func TestRequestPlanRejectsDuplicateReport(t *testing.T) {
 	selector := selectorForConfig(t, selectorTestConfig(config.RouterSelectionWeightedRoundRobin, 1, 1))
 	plan, err := selector.Begin(SelectionRequest{PublicModel: "model-a"})

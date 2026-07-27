@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -99,6 +100,31 @@ func (s *Selector) HandlesModelCapability(publicModel string, capability config.
 	}
 	group, ok := snapshot.ModelGroupForModel(publicModel)
 	return ok && group.Enabled && (capability == "" || group.Capability == capability)
+}
+
+// PublicModels returns enabled public model names with at least one statically
+// enabled route to an enabled upstream. Runtime circuit and health state is
+// intentionally ignored so /v1/models does not flap during a cooldown.
+func (s *Selector) PublicModels() []string {
+	if s == nil || s.snapshots == nil {
+		return nil
+	}
+	s.snapshotMu.RLock()
+	snapshot := s.snapshots.Load()
+	s.snapshotMu.RUnlock()
+	if snapshot == nil {
+		return nil
+	}
+
+	models := make([]string, 0)
+	for _, group := range snapshot.ModelGroups() {
+		if !group.Enabled || len(snapshot.AvailableRoutesForModel(group.PublicModel)) == 0 {
+			continue
+		}
+		models = append(models, group.PublicModel)
+	}
+	sort.Strings(models)
+	return models
 }
 
 func (s *Selector) Begin(request SelectionRequest) (*RequestPlan, error) {

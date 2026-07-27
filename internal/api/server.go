@@ -265,6 +265,9 @@ type Server struct {
 	// pluginHost owns dynamic plugin Management API route dispatch.
 	pluginHost *pluginhost.Host
 
+	// smartRouterSelector owns the live router model catalog and routing snapshot.
+	smartRouterSelector *smartrouter.Selector
+
 	// managementRoutesRegistered tracks whether the management routes have been attached to the engine.
 	managementRoutesRegistered atomic.Bool
 	// managementRoutesEnabled controls whether management endpoints serve real handlers.
@@ -359,6 +362,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		envManagementSecret: envManagementSecret,
 		wsRoutes:            make(map[string]struct{}),
 		pluginHost:          optionState.pluginHost,
+		smartRouterSelector: optionState.smartRouterSelector,
 
 		exampleAPIKeySafeModeEnabled: optionState.exampleAPIKeySafeMode,
 	}
@@ -1188,6 +1192,11 @@ func isAnthropicModelsRequest(c *gin.Context) bool {
 // route to the Claude handler, otherwise they route to the OpenAI handler.
 func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, claudeHandler *claude.ClaudeCodeAPIHandler) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if s != nil && s.cfg != nil && s.cfg.ServiceRole == config.ServiceRoleRouter && s.smartRouterSelector != nil {
+			s.handleSmartRouterModels(c)
+			return
+		}
+
 		if _, ok := c.Request.URL.Query()["client_version"]; ok {
 			if s != nil && s.cfg != nil && s.cfg.Home.Enabled {
 				s.handleHomeCodexClientModels(c)
@@ -1209,6 +1218,23 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 			openaiHandler.OpenAIModels(c)
 		}
 	}
+}
+
+func (s *Server) handleSmartRouterModels(c *gin.Context) {
+	publicModels := s.smartRouterSelector.PublicModels()
+	models := make([]gin.H, 0, len(publicModels))
+	for _, publicModel := range publicModels {
+		models = append(models, gin.H{
+			"id":       publicModel,
+			"object":   "model",
+			"created":  0,
+			"owned_by": "smart-router",
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"object": "list",
+		"data":   models,
+	})
 }
 
 func (s *Server) handleHomeCodexClientModels(c *gin.Context) {
