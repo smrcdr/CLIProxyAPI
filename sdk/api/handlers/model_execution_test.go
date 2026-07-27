@@ -28,6 +28,7 @@ type modelExecutionCaptureExecutor struct {
 	lastOptions coreexecutor.Options
 	execute     func(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error)
 	stream      func(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error)
+	count       func(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error)
 }
 
 type modelExecutionStatusHeaderError struct {
@@ -132,7 +133,11 @@ func (e *modelExecutionCaptureExecutor) Refresh(ctx context.Context, auth *corea
 	return auth, nil
 }
 
-func (e *modelExecutionCaptureExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+func (e *modelExecutionCaptureExecutor) CountTokens(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+	e.capture(req, opts)
+	if e.count != nil {
+		return e.count(ctx, auth, req, opts)
+	}
 	return coreexecutor.Response{Payload: []byte("0")}, nil
 }
 

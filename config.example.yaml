@@ -12,6 +12,13 @@ service-role: combined
 
 # SmartRouter registry. A pool deployment must not define this section.
 # router:
+#   # Public HTTPS targets are allowed by default. HTTP and private targets
+#   # require explicit policy entries; redirect hosts are always explicit.
+#   network-policy:
+#     allow-http: true
+#     allowed-private-hosts: [codex-pool]
+#     allowed-private-cidrs: [172.16.0.0/12]
+#     allowed-redirect-hosts: []
 #   upstreams:
 #     - id: codex-pool-eu
 #       name: Codex pool EU
@@ -32,6 +39,7 @@ service-role: combined
 #         interval: 30s
 #         unhealthy-threshold: 3
 #         healthy-threshold: 2
+#       trusted-pool: true
 #       forward-smartapi-affinity: true
 #   model-groups:
 #     - id: gpt-5-6-sol
@@ -77,7 +85,8 @@ remote-management:
 # Authentication directory (supports ~ for home directory)
 auth-dir: "~/.cli-proxy-api"
 
-# API keys for authentication
+# API keys for authentication. In router role these inference keys must differ
+# from the management key.
 api-keys:
   - "your-api-key-1"
   - "your-api-key-2"

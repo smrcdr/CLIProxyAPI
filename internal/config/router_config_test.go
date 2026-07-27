@@ -135,11 +135,48 @@ func TestRouterConfigValidation(t *testing.T) {
 			wantErr: "absolute HTTP or HTTPS URL",
 		},
 		{
+			name: "http base URL requires policy opt in",
+			mutate: func(cfg *Config) {
+				cfg.Router.Upstreams[0].BaseURL = "http://example.com/v1"
+			},
+			wantErr: "allow-http is disabled",
+		},
+		{
+			name: "private hostname requires allowlist",
+			mutate: func(cfg *Config) {
+				cfg.Router.NetworkPolicy.AllowHTTP = true
+				cfg.Router.Upstreams[0].BaseURL = "http://codex-pool:8317/v1"
+			},
+			wantErr: "allowed-private-hosts",
+		},
+		{
+			name: "private address requires CIDR allowlist",
+			mutate: func(cfg *Config) {
+				cfg.Router.NetworkPolicy.AllowHTTP = true
+				cfg.Router.Upstreams[0].BaseURL = "http://172.18.0.5:8317/v1"
+			},
+			wantErr: "allowed-private-cidrs",
+		},
+		{
+			name: "invalid private CIDR",
+			mutate: func(cfg *Config) {
+				cfg.Router.NetworkPolicy.AllowedPrivateCIDRs = []string{"0.0.0.0/0"}
+			},
+			wantErr: "non-public network",
+		},
+		{
 			name: "reserved header",
 			mutate: func(cfg *Config) {
 				cfg.Router.Upstreams[0].Headers = map[string]string{"Authorization": "secret"}
 			},
 			wantErr: "is reserved",
+		},
+		{
+			name: "affinity forwarding requires trusted pool",
+			mutate: func(cfg *Config) {
+				cfg.Router.Upstreams[0].ForwardSmartAPIAffinity = true
+			},
+			wantErr: "requires trusted-pool",
 		},
 		{
 			name: "protocol capability mismatch",
@@ -196,6 +233,38 @@ func TestRouterConfigValidation(t *testing.T) {
 	}
 }
 
+func TestRouterNetworkPolicyAllowsExplicitPrivateDockerTarget(t *testing.T) {
+	cfg := validRouterTestConfig()
+	cfg.Router.NetworkPolicy = RouterNetworkPolicy{
+		AllowHTTP:           true,
+		AllowedPrivateHosts: []string{"CODEX-POOL."},
+		AllowedPrivateCIDRs: []string{"172.18.0.0/16"},
+	}
+	cfg.Router.Upstreams[0].BaseURL = "http://codex-pool:8317/v1"
+
+	if err := cfg.NormalizeAndValidateRouter(); err != nil {
+		t.Fatalf("NormalizeAndValidateRouter() error = %v", err)
+	}
+	policy := cfg.Router.NetworkPolicy
+	if len(policy.AllowedPrivateHosts) != 1 || policy.AllowedPrivateHosts[0] != "codex-pool" {
+		t.Fatalf("AllowedPrivateHosts = %#v", policy.AllowedPrivateHosts)
+	}
+	if len(policy.AllowedPrivateCIDRs) != 1 || policy.AllowedPrivateCIDRs[0] != "172.18.0.0/16" {
+		t.Fatalf("AllowedPrivateCIDRs = %#v", policy.AllowedPrivateCIDRs)
+	}
+}
+
+func TestRouterRoleRejectsSharedInferenceAndManagementKey(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "shared-router-key")
+	cfg := validRouterTestConfig()
+	cfg.APIKeys = []string{"shared-router-key"}
+
+	err := cfg.NormalizeAndValidateRouter()
+	if err == nil || !strings.Contains(err.Error(), "inference and management keys must be different") {
+		t.Fatalf("NormalizeAndValidateRouter() error = %v", err)
+	}
+}
+
 func TestRouterConfigAllowsDisabledReferencedUpstream(t *testing.T) {
 	cfg := validRouterTestConfig()
 	disabled := false
@@ -203,6 +272,85 @@ func TestRouterConfigAllowsDisabledReferencedUpstream(t *testing.T) {
 
 	if err := cfg.NormalizeAndValidateRouter(); err != nil {
 		t.Fatalf("NormalizeAndValidateRouter() error = %v", err)
+	}
+}
+
+func TestRouterRoleRejectsEveryLocalCredentialConfigurationSource(t *testing.T) {
+	enabled := true
+	tests := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr string
+	}{
+		{
+			name: "home",
+			mutate: func(cfg *Config) {
+				cfg.Home.Enabled = true
+			},
+			wantErr: "home runtime credentials",
+		},
+		{
+			name: "gemini api keys",
+			mutate: func(cfg *Config) {
+				cfg.GeminiKey = []GeminiKey{{APIKey: "fixture"}}
+			},
+			wantErr: "gemini-api-key",
+		},
+		{
+			name: "interactions api keys",
+			mutate: func(cfg *Config) {
+				cfg.InteractionsKey = []GeminiKey{{APIKey: "fixture"}}
+			},
+			wantErr: "interactions-api-key",
+		},
+		{
+			name: "codex api keys",
+			mutate: func(cfg *Config) {
+				cfg.CodexKey = []CodexKey{{APIKey: "fixture"}}
+			},
+			wantErr: "codex-api-key",
+		},
+		{
+			name: "claude api keys",
+			mutate: func(cfg *Config) {
+				cfg.ClaudeKey = []ClaudeKey{{APIKey: "fixture"}}
+			},
+			wantErr: "claude-api-key",
+		},
+		{
+			name: "openai compatibility",
+			mutate: func(cfg *Config) {
+				cfg.OpenAICompatibility = []OpenAICompatibility{{Name: "fixture"}}
+			},
+			wantErr: "openai-compatibility",
+		},
+		{
+			name: "vertex api keys",
+			mutate: func(cfg *Config) {
+				cfg.VertexCompatAPIKey = []VertexCompatKey{{APIKey: "fixture"}}
+			},
+			wantErr: "vertex-api-key",
+		},
+		{
+			name: "enabled credential plugin",
+			mutate: func(cfg *Config) {
+				cfg.Plugins.Configs = map[string]PluginInstanceConfig{
+					"fixture": {Enabled: &enabled},
+				}
+			},
+			wantErr: "enabled plugin",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validRouterTestConfig()
+			tt.mutate(cfg)
+			err := cfg.NormalizeAndValidateRouter()
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("NormalizeAndValidateRouter() error = %v, want %q", err, tt.wantErr)
+			}
+		})
 	}
 }
 

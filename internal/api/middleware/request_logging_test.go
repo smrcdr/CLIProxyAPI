@@ -80,6 +80,54 @@ func TestShouldSkipMethodForRequestLogging(t *testing.T) {
 	}
 }
 
+func TestShouldSkipRequestForRequestLoggingOmitsImageGenerationBodies(t *testing.T) {
+	for _, path := range []string{
+		"/v1/images/generations",
+		"/v1/images/generations/",
+		"/images/generations",
+		"/v0/management/router/upstreams",
+		"/v0/management/router/upstreams/primary",
+	} {
+		req := &http.Request{
+			Method: http.MethodPost,
+			URL:    &url.URL{Path: path},
+		}
+		if !shouldSkipRequestForRequestLogging(req) {
+			t.Fatalf("path %q was not excluded from request logging", path)
+		}
+	}
+
+	req := &http.Request{
+		Method: http.MethodPost,
+		URL:    &url.URL{Path: "/v1/responses"},
+	}
+	if shouldSkipRequestForRequestLogging(req) {
+		t.Fatal("ordinary Responses request was unexpectedly excluded")
+	}
+}
+
+func TestRequestLoggingMiddlewareDoesNotCaptureImageGenerationResponse(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logger := &testRequestLogger{enabled: true}
+	router := gin.New()
+	router.Use(RequestLoggingMiddleware(logger))
+	router.POST("/v1/images/generations", func(c *gin.Context) {
+		c.Data(http.StatusOK, "application/json", []byte(`{"data":[{"b64_json":"secret-image"}]}`))
+	})
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"prompt":"draw"}`))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "secret-image") {
+		t.Fatalf("client response = %d %s", recorder.Code, recorder.Body.String())
+	}
+	if logger.calls != 0 {
+		t.Fatalf("request logger received %d image generation log(s)", logger.calls)
+	}
+}
+
 func TestShouldCaptureRequestBody(t *testing.T) {
 	tests := []struct {
 		name          string

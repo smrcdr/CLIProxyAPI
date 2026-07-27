@@ -1679,6 +1679,9 @@ func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, au
 	if registryRef == nil || auth == nil {
 		return true
 	}
+	if auth.Attributes != nil && strings.EqualFold(strings.TrimSpace(auth.Attributes["smartrouter_managed"]), "true") {
+		return true
+	}
 	routeKey := canonicalModelKey(routeModel)
 	if routeKey == "" {
 		return true
@@ -2210,6 +2213,34 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 		m.persistCooldownStates(ctx)
 	}
 	return auth.Clone(), nil
+}
+
+// RegisterRuntime inserts an in-memory-only auth entry. It deliberately skips
+// token-store persistence, refresh scheduling, and lifecycle hooks so resolved
+// router secrets cannot escape their runtime boundary.
+func (m *Manager) RegisterRuntime(auth *Auth) *Auth {
+	if m == nil || auth == nil {
+		return nil
+	}
+	if strings.TrimSpace(auth.ID) == "" {
+		auth.ID = uuid.NewString()
+	}
+	now := time.Now()
+	if auth.CreatedAt.IsZero() {
+		auth.CreatedAt = now
+	}
+	auth.UpdatedAt = now
+	auth.EnsureIndex()
+	authClone := auth.Clone()
+
+	m.mu.Lock()
+	m.auths[auth.ID] = authClone
+	m.mu.Unlock()
+	if m.scheduler != nil {
+		m.scheduler.upsertAuth(authClone)
+	}
+	m.syncScheduler()
+	return authClone.Clone()
 }
 
 // Update replaces an existing auth entry and notifies hooks.

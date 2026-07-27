@@ -1,7 +1,10 @@
 package config
 
 import (
+	"crypto/subtle"
 	"fmt"
+	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"regexp"
@@ -9,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/net/http/httpguts"
 )
 
@@ -60,8 +64,16 @@ const (
 )
 
 type RouterConfig struct {
-	Upstreams   []RouterUpstream   `yaml:"upstreams,omitempty" json:"upstreams,omitempty"`
-	ModelGroups []RouterModelGroup `yaml:"model-groups,omitempty" json:"model-groups,omitempty"`
+	NetworkPolicy RouterNetworkPolicy `yaml:"network-policy,omitempty" json:"network-policy,omitempty"`
+	Upstreams     []RouterUpstream    `yaml:"upstreams,omitempty" json:"upstreams,omitempty"`
+	ModelGroups   []RouterModelGroup  `yaml:"model-groups,omitempty" json:"model-groups,omitempty"`
+}
+
+type RouterNetworkPolicy struct {
+	AllowHTTP            bool     `yaml:"allow-http,omitempty" json:"allow-http,omitempty"`
+	AllowedPrivateHosts  []string `yaml:"allowed-private-hosts,omitempty" json:"allowed-private-hosts,omitempty"`
+	AllowedPrivateCIDRs  []string `yaml:"allowed-private-cidrs,omitempty" json:"allowed-private-cidrs,omitempty"`
+	AllowedRedirectHosts []string `yaml:"allowed-redirect-hosts,omitempty" json:"allowed-redirect-hosts,omitempty"`
 }
 
 type RouterUpstream struct {
@@ -74,6 +86,7 @@ type RouterUpstream struct {
 	Headers                 map[string]string  `yaml:"headers,omitempty" json:"headers,omitempty"`
 	Capabilities            RouterCapabilities `yaml:"capabilities" json:"capabilities"`
 	HealthCheck             RouterHealthCheck  `yaml:"health-check,omitempty" json:"health-check"`
+	TrustedPool             bool               `yaml:"trusted-pool,omitempty" json:"trusted-pool"`
 	ForwardSmartAPIAffinity bool               `yaml:"forward-smartapi-affinity,omitempty" json:"forward-smartapi-affinity"`
 }
 
@@ -178,6 +191,7 @@ func (cfg *Config) NormalizeAndValidateRouter() error {
 	}
 	cfg.PoolKind = strings.ToLower(strings.TrimSpace(cfg.PoolKind))
 
+	normalizeRouterNetworkPolicy(&cfg.Router.NetworkPolicy)
 	for i := range cfg.Router.Upstreams {
 		normalizeRouterUpstream(&cfg.Router.Upstreams[i])
 	}
@@ -207,6 +221,8 @@ func (cfg *Config) ValidateRouter() error {
 		if cfg.PoolKind != "" {
 			add("pool-kind must be empty when service-role is %q", cfg.ServiceRole)
 		}
+		cfg.validateRouterCredentialIsolation(add)
+		cfg.validateRouterManagementKeyIsolation(add)
 	case ServiceRolePool:
 		if cfg.PoolKind == "" {
 			add("pool-kind is required when service-role is %q", cfg.ServiceRole)
@@ -220,10 +236,11 @@ func (cfg *Config) ValidateRouter() error {
 		add("service-role %q must be one of %q, %q, or %q", cfg.ServiceRole, ServiceRoleCombined, ServiceRoleRouter, ServiceRolePool)
 	}
 
+	validateRouterNetworkPolicy("router.network-policy", cfg.Router.NetworkPolicy, add)
 	upstreamByID := make(map[string]RouterUpstream, len(cfg.Router.Upstreams))
 	for index, upstream := range cfg.Router.Upstreams {
 		path := fmt.Sprintf("router.upstreams[%d]", index)
-		validateRouterUpstream(path, upstream, add)
+		validateRouterUpstream(path, upstream, cfg.Router.NetworkPolicy, add)
 		if upstream.ID == "" {
 			continue
 		}
@@ -258,6 +275,81 @@ func (cfg *Config) ValidateRouter() error {
 		return &RouterValidationError{Problems: problems}
 	}
 	return nil
+}
+
+func (cfg *Config) validateRouterManagementKeyIsolation(add func(string, ...any)) {
+	if cfg == nil {
+		return
+	}
+	envManagementKey := strings.TrimSpace(os.Getenv("MANAGEMENT_PASSWORD"))
+	configManagementKey := strings.TrimSpace(cfg.RemoteManagement.SecretKey)
+	for _, inferenceKey := range cfg.APIKeys {
+		inferenceKey = strings.TrimSpace(inferenceKey)
+		if inferenceKey == "" {
+			continue
+		}
+		if envManagementKey != "" &&
+			subtle.ConstantTimeCompare([]byte(envManagementKey), []byte(inferenceKey)) == 1 {
+			add("router inference and management keys must be different")
+			return
+		}
+		if configManagementKey == "" {
+			continue
+		}
+		if looksLikeBcrypt(configManagementKey) {
+			if bcrypt.CompareHashAndPassword([]byte(configManagementKey), []byte(inferenceKey)) == nil {
+				add("router inference and management keys must be different")
+				return
+			}
+			continue
+		}
+		if subtle.ConstantTimeCompare([]byte(configManagementKey), []byte(inferenceKey)) == 1 {
+			add("router inference and management keys must be different")
+			return
+		}
+	}
+}
+
+// ValidateRouterCredentialIsolation rejects local account and provider
+// credential sources that belong in pool services, never in router role.
+func (cfg *Config) ValidateRouterCredentialIsolation() error {
+	if cfg == nil || cfg.ServiceRole != ServiceRoleRouter {
+		return nil
+	}
+	problems := make([]string, 0)
+	cfg.validateRouterCredentialIsolation(func(format string, args ...any) {
+		problems = append(problems, fmt.Sprintf(format, args...))
+	})
+	if len(problems) == 0 {
+		return nil
+	}
+	return &RouterValidationError{Problems: problems}
+}
+
+func (cfg *Config) validateRouterCredentialIsolation(add func(string, ...any)) {
+	if cfg == nil || add == nil {
+		return
+	}
+	if cfg.Home.Enabled {
+		add("home runtime credentials are not allowed when service-role is %q", ServiceRoleRouter)
+	}
+	for name, count := range map[string]int{
+		"gemini-api-key":       len(cfg.GeminiKey),
+		"interactions-api-key": len(cfg.InteractionsKey),
+		"codex-api-key":        len(cfg.CodexKey),
+		"claude-api-key":       len(cfg.ClaudeKey),
+		"openai-compatibility": len(cfg.OpenAICompatibility),
+		"vertex-api-key":       len(cfg.VertexCompatAPIKey),
+	} {
+		if count > 0 {
+			add("%s credentials are not allowed when service-role is %q", name, ServiceRoleRouter)
+		}
+	}
+	for id, plugin := range cfg.Plugins.Configs {
+		if plugin.Enabled != nil && *plugin.Enabled {
+			add("enabled plugin %q is not allowed when service-role is %q", id, ServiceRoleRouter)
+		}
+	}
 }
 
 func finalizeRouterConfig(cfg *Config, applyEnvironment bool) error {
@@ -326,6 +418,60 @@ func normalizeRouterUpstream(upstream *RouterUpstream) {
 	ensureBoolDefaultTrue(&upstream.Enabled)
 }
 
+func normalizeRouterNetworkPolicy(policy *RouterNetworkPolicy) {
+	if policy == nil {
+		return
+	}
+	policy.AllowedPrivateHosts = normalizeRouterHosts(policy.AllowedPrivateHosts)
+	policy.AllowedRedirectHosts = normalizeRouterHosts(policy.AllowedRedirectHosts)
+	policy.AllowedPrivateCIDRs = normalizeRouterCIDRs(policy.AllowedPrivateCIDRs)
+}
+
+func normalizeRouterHosts(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(value), "."))
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func normalizeRouterCIDRs(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if prefix, err := netip.ParsePrefix(value); err == nil {
+			value = prefix.Masked().String()
+		}
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
 func normalizeRouterModelGroup(group *RouterModelGroup) {
 	if group == nil {
 		return
@@ -378,7 +524,7 @@ func normalizeRouterEndpoints(values []string) []string {
 	return out
 }
 
-func validateRouterUpstream(path string, upstream RouterUpstream, add func(string, ...any)) {
+func validateRouterUpstream(path string, upstream RouterUpstream, policy RouterNetworkPolicy, add func(string, ...any)) {
 	validateRouterIdentifier(path+".id", upstream.ID, add)
 	if upstream.Name == "" {
 		add("%s.name is required", path)
@@ -390,7 +536,7 @@ func validateRouterUpstream(path string, upstream RouterUpstream, add func(strin
 		add("%s.protocol %q is unsupported", path, upstream.Protocol)
 	}
 
-	validateRouterBaseURL(path+".base-url", upstream.BaseURL, add)
+	validateRouterBaseURL(path+".base-url", upstream.BaseURL, policy, add)
 	validateRouterAuth(path+".auth", upstream.Auth, add)
 	validateRouterHeaders(path+".headers", upstream.Headers, add)
 
@@ -434,6 +580,9 @@ func validateRouterUpstream(path string, upstream RouterUpstream, add func(strin
 	}
 
 	validateRouterHealthCheck(path+".health-check", upstream.HealthCheck, add)
+	if upstream.ForwardSmartAPIAffinity && !upstream.TrustedPool {
+		add("%s.forward-smartapi-affinity requires trusted-pool", path)
+	}
 }
 
 func validateRouterModelGroup(path string, group RouterModelGroup, upstreamByID map[string]RouterUpstream, routeIDs map[string]struct{}, add func(string, ...any)) {
@@ -506,7 +655,7 @@ func validateRouterIdentifier(path, value string, add func(string, ...any)) {
 	}
 }
 
-func validateRouterBaseURL(path, value string, add func(string, ...any)) {
+func validateRouterBaseURL(path, value string, policy RouterNetworkPolicy, add func(string, ...any)) {
 	if value == "" {
 		add("%s is required", path)
 		return
@@ -522,6 +671,146 @@ func validateRouterBaseURL(path, value string, add func(string, ...any)) {
 	if parsed.RawQuery != "" || parsed.Fragment != "" {
 		add("%s must not contain a query or fragment", path)
 	}
+	if err := policy.ValidateTargetURL(parsed); err != nil {
+		add("%s %s", path, err)
+	}
+}
+
+func validateRouterNetworkPolicy(path string, policy RouterNetworkPolicy, add func(string, ...any)) {
+	for index, host := range policy.AllowedPrivateHosts {
+		validateRouterPolicyHost(fmt.Sprintf("%s.allowed-private-hosts[%d]", path, index), host, add)
+	}
+	for index, host := range policy.AllowedRedirectHosts {
+		validateRouterPolicyHost(fmt.Sprintf("%s.allowed-redirect-hosts[%d]", path, index), host, add)
+	}
+	for index, raw := range policy.AllowedPrivateCIDRs {
+		prefix, err := netip.ParsePrefix(raw)
+		if err != nil {
+			add("%s.allowed-private-cidrs[%d] %q must be a valid CIDR", path, index, raw)
+			continue
+		}
+		if !isAllowedPrivateRouterPrefix(prefix.Masked()) {
+			add("%s.allowed-private-cidrs[%d] %q must describe a non-public network", path, index, raw)
+		}
+	}
+}
+
+func validateRouterPolicyHost(path, host string, add func(string, ...any)) {
+	if host == "" {
+		add("%s must not be empty", path)
+		return
+	}
+	if strings.ContainsAny(host, "/:*[]") || net.ParseIP(host) != nil || !routerHostnamePattern.MatchString(host) {
+		add("%s %q must be an exact DNS hostname without scheme, port, wildcard, or IP address", path, host)
+	}
+}
+
+// ValidateTargetURL applies the static SmartRouter network policy. DNS answers
+// are checked by the router HTTP transport immediately before each request.
+func (policy RouterNetworkPolicy) ValidateTargetURL(target *url.URL) error {
+	if target == nil || target.Hostname() == "" {
+		return fmt.Errorf("must contain a target hostname")
+	}
+	if target.Scheme == "http" && !policy.AllowHTTP {
+		return fmt.Errorf("uses HTTP but router.network-policy.allow-http is disabled")
+	}
+	host := normalizeRouterHost(target.Hostname())
+	if address, err := netip.ParseAddr(host); err == nil {
+		if !isPublicRouterAddress(address) && !policy.AllowsPrivateAddress(address) {
+			return fmt.Errorf("targets non-public address %q outside router.network-policy.allowed-private-cidrs", host)
+		}
+		return nil
+	}
+	if isRouterPrivateHostname(host) && !policy.AllowsPrivateHost(host) {
+		return fmt.Errorf("targets private hostname %q outside router.network-policy.allowed-private-hosts", host)
+	}
+	return nil
+}
+
+func (policy RouterNetworkPolicy) AllowsPrivateHost(host string) bool {
+	host = normalizeRouterHost(host)
+	for _, allowed := range policy.AllowedPrivateHosts {
+		if host == normalizeRouterHost(allowed) {
+			return true
+		}
+	}
+	return false
+}
+
+func (policy RouterNetworkPolicy) AllowsRedirectHost(host string) bool {
+	host = normalizeRouterHost(host)
+	for _, allowed := range policy.AllowedRedirectHosts {
+		if host == normalizeRouterHost(allowed) {
+			return true
+		}
+	}
+	return false
+}
+
+func (policy RouterNetworkPolicy) AllowsPrivateAddress(address netip.Addr) bool {
+	address = address.Unmap()
+	for _, raw := range policy.AllowedPrivateCIDRs {
+		prefix, err := netip.ParsePrefix(raw)
+		if err == nil && prefix.Contains(address) {
+			return true
+		}
+	}
+	return false
+}
+
+func (policy RouterNetworkPolicy) AllowsResolvedAddress(host string, address netip.Addr) bool {
+	if policy.AllowsPrivateHost(host) {
+		return true
+	}
+	address = address.Unmap()
+	return isPublicRouterAddress(address) || policy.AllowsPrivateAddress(address)
+}
+
+func normalizeRouterHost(host string) string {
+	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+}
+
+func isRouterPrivateHostname(host string) bool {
+	host = normalizeRouterHost(host)
+	return host == "localhost" ||
+		!strings.Contains(host, ".") ||
+		strings.HasSuffix(host, ".localhost") ||
+		strings.HasSuffix(host, ".local") ||
+		strings.HasSuffix(host, ".internal")
+}
+
+func isPublicRouterAddress(address netip.Addr) bool {
+	address = address.Unmap()
+	return address.IsValid() &&
+		address.IsGlobalUnicast() &&
+		!address.IsPrivate() &&
+		!address.IsLoopback() &&
+		!address.IsLinkLocalUnicast() &&
+		!address.IsLinkLocalMulticast() &&
+		!address.IsMulticast() &&
+		!address.IsUnspecified()
+}
+
+func isAllowedPrivateRouterPrefix(candidate netip.Prefix) bool {
+	for _, raw := range []string{
+		"10.0.0.0/8",
+		"100.64.0.0/10",
+		"127.0.0.0/8",
+		"169.254.0.0/16",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"::1/128",
+		"fc00::/7",
+		"fe80::/10",
+	} {
+		parent := netip.MustParsePrefix(raw)
+		if candidate.Addr().BitLen() == parent.Addr().BitLen() &&
+			candidate.Bits() >= parent.Bits() &&
+			parent.Contains(candidate.Addr()) {
+			return true
+		}
+	}
+	return false
 }
 
 func validateRouterAuth(path string, auth RouterUpstreamAuth, add func(string, ...any)) {
@@ -652,4 +941,5 @@ func boolValueDefaultTrue(value *bool) bool {
 var (
 	routerIdentifierPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$`)
 	routerSecretRefPattern  = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,158}[A-Za-z0-9])?$`)
+	routerHostnamePattern   = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$`)
 )

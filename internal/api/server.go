@@ -36,6 +36,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/safemode"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/smartapiusage"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/smartrouter"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
@@ -82,6 +83,9 @@ type serverOptionConfig struct {
 	postAuthPersistHook   auth.PostAuthHook
 	pluginHost            *pluginhost.Host
 	configReloadHook      func(context.Context, *config.Config)
+	smartRouterSelector   *smartrouter.Selector
+	routerManagement      *smartrouter.RouterManagementService
+	routerProber          smartrouter.RouterProber
 	exampleAPIKeySafeMode bool
 }
 
@@ -179,6 +183,28 @@ func WithPluginHost(host *pluginhost.Host) ServerOption {
 func WithConfigReloadHook(hook func(context.Context, *config.Config)) ServerOption {
 	return func(cfg *serverOptionConfig) {
 		cfg.configReloadHook = hook
+	}
+}
+
+// WithSmartRouterSelector connects router-role public handlers to the compiled
+// Smart Router selector.
+func WithSmartRouterSelector(selector *smartrouter.Selector) ServerOption {
+	return func(cfg *serverOptionConfig) {
+		cfg.smartRouterSelector = selector
+	}
+}
+
+// WithRouterManagementService connects the authenticated router management API.
+func WithRouterManagementService(service *smartrouter.RouterManagementService) ServerOption {
+	return func(cfg *serverOptionConfig) {
+		cfg.routerManagement = service
+	}
+}
+
+// WithRouterProber connects non-inference router health checks to management.
+func WithRouterProber(prober smartrouter.RouterProber) ServerOption {
+	return func(cfg *serverOptionConfig) {
+		cfg.routerProber = prober
 	}
 }
 
@@ -339,6 +365,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	s.exampleAPIKeySafeModeActive.Store(s.exampleAPIKeySafeModeRequired(cfg))
 	s.handlers.SetPluginHost(optionState.pluginHost)
+	s.handlers.SetSmartRouterSelector(optionState.smartRouterSelector)
 	if optionState.pluginHost != nil {
 		optionState.pluginHost.SetModelExecutor(s.handlers)
 		optionState.pluginHost.SetAuthManager(authManager)
@@ -363,6 +390,8 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
 	s.mgmt.SetPluginHost(optionState.pluginHost)
 	s.mgmt.SetConfigReloadHook(optionState.configReloadHook)
+	s.mgmt.SetRouterManagementService(optionState.routerManagement, optionState.smartRouterSelector)
+	s.mgmt.SetRouterProber(optionState.routerProber)
 	if optionState.localPassword != "" {
 		s.mgmt.SetLocalPassword(optionState.localPassword)
 	}
@@ -581,50 +610,51 @@ func (s *Server) setupRoutes() {
 		})
 	})
 
-	// OAuth callback endpoints (reuse main server port)
-	// These endpoints receive provider redirects and persist
-	// the short-lived code/state for the waiting goroutine.
-	s.engine.GET("/anthropic/callback", func(c *gin.Context) {
-		code := c.Query("code")
-		state := c.Query("state")
-		errStr := c.Query("error")
-		if errStr == "" {
-			errStr = c.Query("error_description")
-		}
-		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "anthropic", state, code, errStr)
-		}
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, oauthCallbackSuccessHTML)
-	})
+	if s.cfg.ServiceRole != config.ServiceRoleRouter {
+		// OAuth callback endpoints receive provider redirects and persist the
+		// short-lived code/state for the waiting goroutine.
+		s.engine.GET("/anthropic/callback", func(c *gin.Context) {
+			code := c.Query("code")
+			state := c.Query("state")
+			errStr := c.Query("error")
+			if errStr == "" {
+				errStr = c.Query("error_description")
+			}
+			if state != "" {
+				_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "anthropic", state, code, errStr)
+			}
+			c.Header("Content-Type", "text/html; charset=utf-8")
+			c.String(http.StatusOK, oauthCallbackSuccessHTML)
+		})
 
-	s.engine.GET("/codex/callback", func(c *gin.Context) {
-		code := c.Query("code")
-		state := c.Query("state")
-		errStr := c.Query("error")
-		if errStr == "" {
-			errStr = c.Query("error_description")
-		}
-		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "codex", state, code, errStr)
-		}
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, oauthCallbackSuccessHTML)
-	})
+		s.engine.GET("/codex/callback", func(c *gin.Context) {
+			code := c.Query("code")
+			state := c.Query("state")
+			errStr := c.Query("error")
+			if errStr == "" {
+				errStr = c.Query("error_description")
+			}
+			if state != "" {
+				_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "codex", state, code, errStr)
+			}
+			c.Header("Content-Type", "text/html; charset=utf-8")
+			c.String(http.StatusOK, oauthCallbackSuccessHTML)
+		})
 
-	s.engine.GET("/antigravity/callback", func(c *gin.Context) {
-		code := c.Query("code")
-		state := c.Query("state")
-		errStr := c.Query("error")
-		if errStr == "" {
-			errStr = c.Query("error_description")
-		}
-		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "antigravity", state, code, errStr)
-		}
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, oauthCallbackSuccessHTML)
-	})
+		s.engine.GET("/antigravity/callback", func(c *gin.Context) {
+			code := c.Query("code")
+			state := c.Query("state")
+			errStr := c.Query("error")
+			if errStr == "" {
+				errStr = c.Query("error_description")
+			}
+			if state != "" {
+				_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "antigravity", state, code, errStr)
+			}
+			c.Header("Content-Type", "text/html; charset=utf-8")
+			c.String(http.StatusOK, oauthCallbackSuccessHTML)
+		})
+	}
 
 	// Management routes are registered lazily by registerManagementRoutes when a secret is configured.
 }
@@ -675,13 +705,14 @@ func (s *Server) registerManagementRoutes() {
 	}
 
 	log.Info("management routes registered after secret key configuration")
-	s.mgmt.StartCodexQuotaPoller(context.Background())
-
-	s.engine.POST("/v0/management/oauth-callback", s.managementAvailabilityMiddleware(), s.mgmt.PostOAuthCallback)
-	s.engine.GET("/v0/management/oauth-callback", s.managementAvailabilityMiddleware(), s.mgmt.GetOAuthCallback)
+	if s.cfg.ServiceRole != config.ServiceRoleRouter {
+		s.mgmt.StartCodexQuotaPoller(context.Background())
+		s.engine.POST("/v0/management/oauth-callback", s.managementAvailabilityMiddleware(), s.mgmt.PostOAuthCallback)
+		s.engine.GET("/v0/management/oauth-callback", s.managementAvailabilityMiddleware(), s.mgmt.GetOAuthCallback)
+	}
 
 	mgmt := s.engine.Group("/v0/management")
-	mgmt.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware())
+	mgmt.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware(), s.routerRoleManagementIsolationMiddleware())
 	{
 		mgmt.GET("/config", s.mgmt.GetConfig)
 		mgmt.GET("/config.yaml", s.mgmt.GetConfigYAML)
@@ -735,6 +766,38 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.POST("/codex-device-sessions", s.mgmt.CreateCodexDeviceSession)
 		mgmt.GET("/codex-device-sessions/:id", s.mgmt.GetCodexDeviceSession)
 		mgmt.DELETE("/codex-device-sessions/:id", s.mgmt.DeleteCodexDeviceSession)
+
+		routerManagement := mgmt.Group("/router")
+		{
+			routerManagement.GET("/schemas/upstream-types", s.mgmt.GetRouterUpstreamTypes)
+			routerManagement.GET("/schemas/model-group", s.mgmt.GetRouterModelGroupSchema)
+			routerManagement.GET("/schemas/network-policy", s.mgmt.GetRouterNetworkPolicySchema)
+			routerManagement.GET("/network-policy", s.mgmt.GetRouterNetworkPolicy)
+			routerManagement.PATCH("/network-policy", s.mgmt.PatchRouterNetworkPolicy)
+			routerManagement.GET("/upstreams", s.mgmt.ListRouterUpstreams)
+			routerManagement.POST("/upstreams", s.mgmt.CreateRouterUpstream)
+			routerManagement.GET("/upstreams/:id", s.mgmt.GetRouterUpstream)
+			routerManagement.PATCH("/upstreams/:id", s.mgmt.PatchRouterUpstream)
+			routerManagement.DELETE("/upstreams/:id", s.mgmt.DeleteRouterUpstream)
+			routerManagement.POST("/upstreams/:id/test", s.mgmt.TestRouterUpstream)
+			routerManagement.POST("/upstreams/:id/enable", s.mgmt.EnableRouterUpstream)
+			routerManagement.POST("/upstreams/:id/disable", s.mgmt.DisableRouterUpstream)
+			routerManagement.GET("/model-groups", s.mgmt.ListRouterModelGroups)
+			routerManagement.POST("/model-groups", s.mgmt.CreateRouterModelGroup)
+			routerManagement.GET("/model-groups/:id", s.mgmt.GetRouterModelGroup)
+			routerManagement.PATCH("/model-groups/:id", s.mgmt.PatchRouterModelGroup)
+			routerManagement.DELETE("/model-groups/:id", s.mgmt.DeleteRouterModelGroup)
+			routerManagement.POST("/model-groups/:id/routes", s.mgmt.CreateRouterRoute)
+			routerManagement.PATCH("/model-groups/:id/routes/:route_id", s.mgmt.PatchRouterRoute)
+			routerManagement.DELETE("/model-groups/:id/routes/:route_id", s.mgmt.DeleteRouterRoute)
+			routerManagement.POST("/model-groups/:id/validate", s.mgmt.ValidateRouterModelGroup)
+			routerManagement.GET("/state", s.mgmt.GetRouterState)
+			routerManagement.GET("/metrics", s.mgmt.GetRouterMetrics)
+			routerManagement.GET("/routes/state", s.mgmt.ListRouterRouteStates)
+			routerManagement.GET("/routes/:route_id/state", s.mgmt.GetRouterRouteState)
+			routerManagement.POST("/routes/:route_id/probe", s.mgmt.ProbeRouterRoute)
+			routerManagement.POST("/routes/:route_id/circuit/reset", s.mgmt.ResetRouterRouteCircuit)
+		}
 
 		mgmt.GET("/quota-exceeded/switch-project", s.mgmt.GetSwitchProject)
 		mgmt.PUT("/quota-exceeded/switch-project", s.mgmt.PutSwitchProject)
@@ -854,6 +917,54 @@ func (s *Server) managementAvailabilityMiddleware() gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+func (s *Server) routerRoleManagementIsolationMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if s != nil && s.cfg != nil && s.cfg.ServiceRole == config.ServiceRoleRouter && routerRoleForbiddenManagementPath(c.Request.URL.Path) {
+			c.AbortWithStatus(http.StatusNotFound)
+			return
+		}
+		c.Next()
+	}
+}
+
+func routerRoleForbiddenManagementPath(path string) bool {
+	path = strings.TrimPrefix(strings.TrimSpace(path), "/v0/management")
+	for _, prefix := range []string{
+		"/plugins",
+		"/plugin-store",
+		"/api-call",
+		"/codex-accounts",
+		"/codex-device-sessions",
+		"/quota-exceeded",
+		"/reset-quota",
+		"/gemini-api-key",
+		"/interactions-api-key",
+		"/claude-api-key",
+		"/codex-api-key",
+		"/openai-compatibility",
+		"/vertex-api-key",
+		"/oauth-excluded-models",
+		"/oauth-model-alias",
+		"/auth-files",
+		"/model-definitions",
+		"/vertex/import",
+		"/anthropic-auth-url",
+		"/codex-auth-url",
+		"/antigravity-auth-url",
+		"/kimi-auth-url",
+		"/xai-auth-url",
+		"/get-auth-status",
+		"/oauth-session",
+		"/force-model-prefix",
+		"/routing/strategy",
+	} {
+		if path == prefix || strings.HasPrefix(path, prefix+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) managementAvailable(c *gin.Context) bool {

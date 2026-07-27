@@ -25,7 +25,7 @@ func ConvertOpenAIResponsesRequestToInteractions(modelName string, inputRawJSON 
 	}
 	out = appendResponsesToolsToInteractions(out, root.Get("tools"))
 	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
-		out, _ = sjson.SetRawBytes(out, "generation_config.tool_choice", []byte(toolChoice.Raw))
+		out, _ = sjson.SetRawBytes(out, "generation_config.tool_choice", responsesToolChoiceToInteractions(toolChoice))
 	}
 	if effort := root.Get("reasoning.effort"); effort.Exists() && effort.Type == gjson.String {
 		out, _ = sjson.SetBytes(out, "generation_config.thinking_level", strings.ToLower(strings.TrimSpace(effort.String())))
@@ -33,10 +33,16 @@ func ConvertOpenAIResponsesRequestToInteractions(modelName string, inputRawJSON 
 	if summary := root.Get("reasoning.summary"); summary.Exists() && summary.Type == gjson.String {
 		out, _ = sjson.SetBytes(out, "generation_config.thinking_summaries", summary.String())
 	}
+	if maxOutputTokens := root.Get("max_output_tokens"); maxOutputTokens.Exists() {
+		out, _ = sjson.SetRawBytes(out, "generation_config.max_output_tokens", []byte(maxOutputTokens.Raw))
+	}
+	if serviceTier := root.Get("service_tier"); serviceTier.Exists() && serviceTier.Type == gjson.String {
+		out, _ = sjson.SetBytes(out, "service_tier", serviceTier.String())
+	}
 	if format := root.Get("response_format"); format.Exists() {
-		out, _ = sjson.SetRawBytes(out, "response_format", []byte(format.Raw))
+		out, _ = sjson.SetRawBytes(out, "response_format", responsesFormatToInteractions(format))
 	} else if format := root.Get("text.format"); format.Exists() {
-		out, _ = sjson.SetRawBytes(out, "response_format", []byte(format.Raw))
+		out, _ = sjson.SetRawBytes(out, "response_format", responsesFormatToInteractions(format))
 	}
 	return out
 }
@@ -59,15 +65,22 @@ func ConvertInteractionsRequestToOpenAIResponses(modelName string, inputRawJSON 
 	}
 	out = appendInteractionsToolsToResponses(out, root.Get("tools"))
 	if toolChoice := root.Get("generation_config.tool_choice"); toolChoice.Exists() {
-		out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(toolChoice.Raw))
+		out, _ = sjson.SetRawBytes(out, "tool_choice", interactionsToolChoiceToResponses(toolChoice))
 	} else if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
-		out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(toolChoice.Raw))
+		out, _ = sjson.SetRawBytes(out, "tool_choice", interactionsToolChoiceToResponses(toolChoice))
 	}
 	if effort := interactionsThinkingEffort(root); effort != "" {
 		out, _ = sjson.SetBytes(out, "reasoning.effort", effort)
 	}
 	if summary := root.Get("generation_config.thinking_summaries"); summary.Exists() && summary.Type == gjson.String {
 		out, _ = sjson.SetBytes(out, "reasoning.summary", summary.String())
+	}
+	if maxOutputTokens := firstExisting(
+		root.Get("generation_config.max_output_tokens"),
+		root.Get("generationConfig.maxOutputTokens"),
+		root.Get("max_output_tokens"),
+	); maxOutputTokens.Exists() {
+		out, _ = sjson.SetRawBytes(out, "max_output_tokens", []byte(maxOutputTokens.Raw))
 	}
 	if responseModalities := root.Get("response_modalities"); responseModalities.Exists() {
 		out, _ = sjson.SetRawBytes(out, "modalities", []byte(responseModalities.Raw))
@@ -76,7 +89,63 @@ func ConvertInteractionsRequestToOpenAIResponses(modelName string, inputRawJSON 
 		out, _ = sjson.SetBytes(out, "service_tier", serviceTier.String())
 	}
 	if format := root.Get("response_format"); format.Exists() {
-		out, _ = sjson.SetRawBytes(out, "text.format", []byte(format.Raw))
+		out, _ = sjson.SetRawBytes(out, "text.format", interactionsFormatToResponses(format))
+	}
+	return out
+}
+
+func responsesToolChoiceToInteractions(choice gjson.Result) []byte {
+	if choice.Type != gjson.JSON || choice.Get("type").String() != "function" {
+		return []byte(choice.Raw)
+	}
+	name := firstNonEmpty(choice.Get("function.name").String(), choice.Get("name").String())
+	if name == "" {
+		return []byte(choice.Raw)
+	}
+	out := []byte(`{"type":"function","function":{"name":""}}`)
+	out, _ = sjson.SetBytes(out, "function.name", name)
+	return out
+}
+
+func interactionsToolChoiceToResponses(choice gjson.Result) []byte {
+	if choice.Type != gjson.JSON || choice.Get("type").String() != "function" {
+		return []byte(choice.Raw)
+	}
+	name := firstNonEmpty(choice.Get("name").String(), choice.Get("function.name").String())
+	if name == "" {
+		return []byte(choice.Raw)
+	}
+	out := []byte(`{"type":"function","name":""}`)
+	out, _ = sjson.SetBytes(out, "name", name)
+	return out
+}
+
+func responsesFormatToInteractions(format gjson.Result) []byte {
+	if format.Get("type").String() != "json_schema" || format.Get("json_schema").Exists() {
+		return []byte(format.Raw)
+	}
+	out := []byte(`{"type":"json_schema","json_schema":{}}`)
+	for _, field := range []string{"name", "description", "schema", "strict"} {
+		if value := format.Get(field); value.Exists() {
+			out, _ = sjson.SetRawBytes(out, "json_schema."+field, []byte(value.Raw))
+		}
+	}
+	return out
+}
+
+func interactionsFormatToResponses(format gjson.Result) []byte {
+	if format.Get("type").String() != "json_schema" {
+		return []byte(format.Raw)
+	}
+	schema := format.Get("json_schema")
+	if !schema.Exists() {
+		return []byte(format.Raw)
+	}
+	out := []byte(`{"type":"json_schema"}`)
+	for _, field := range []string{"name", "description", "schema", "strict"} {
+		if value := schema.Get(field); value.Exists() {
+			out, _ = sjson.SetRawBytes(out, field, []byte(value.Raw))
+		}
 	}
 	return out
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginstore"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/smartapiusage"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/smartrouter"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -68,6 +69,9 @@ type Handler struct {
 	codexDeviceSessions     map[string]*codexDeviceSession
 	codexFingerprintSecret  []byte
 	codexPollerOnce         sync.Once
+	routerManagement        *smartrouter.RouterManagementService
+	routerSelector          *smartrouter.Selector
+	routerProber            smartrouter.RouterProber
 }
 
 type configReloadSnapshot struct {
@@ -172,6 +176,28 @@ func (h *Handler) SetConfigReloadHook(hook func(context.Context, *config.Config)
 	}
 	h.mu.Lock()
 	h.configReloadHook = hook
+	h.mu.Unlock()
+}
+
+// SetRouterManagementService updates the revisioned Smart Router management
+// service and its runtime circuit selector.
+func (h *Handler) SetRouterManagementService(service *smartrouter.RouterManagementService, selector *smartrouter.Selector) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.routerManagement = service
+	h.routerSelector = selector
+	h.mu.Unlock()
+}
+
+// SetRouterProber updates the non-inference Smart Router health prober.
+func (h *Handler) SetRouterProber(prober smartrouter.RouterProber) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.routerProber = prober
 	h.mu.Unlock()
 }
 

@@ -147,6 +147,62 @@ func TestOAuthCallbackRouteSkipsManagementKeyMiddleware(t *testing.T) {
 	}
 }
 
+func TestRouterRoleHidesLocalCredentialManagementAndOAuthRoutes(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
+	gin.SetMode(gin.TestMode)
+	directory := t.TempDir()
+	cfg := &proxyconfig.Config{
+		SDKConfig:   sdkconfig.SDKConfig{APIKeys: []string{"test-key"}},
+		ServiceRole: proxyconfig.ServiceRoleRouter,
+		AuthDir:     filepath.Join(directory, "auth"),
+	}
+	if err := os.MkdirAll(cfg.AuthDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll(auth) error = %v", err)
+	}
+	server := NewServer(
+		cfg,
+		auth.NewManager(nil, nil, nil),
+		sdkaccess.NewManager(),
+		filepath.Join(directory, "config.yaml"),
+	)
+
+	for _, target := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/codex/callback"},
+		{http.MethodGet, "/anthropic/callback"},
+		{http.MethodGet, "/antigravity/callback"},
+		{http.MethodGet, "/v0/management/oauth-callback"},
+		{http.MethodPost, "/v0/management/api-call"},
+		{http.MethodGet, "/v0/management/codex-accounts"},
+		{http.MethodGet, "/v0/management/auth-files"},
+		{http.MethodGet, "/v0/management/plugins"},
+		{http.MethodGet, "/v0/management/codex-api-key"},
+	} {
+		request := httptest.NewRequest(target.method, target.path, nil)
+		request.Header.Set("X-Management-Key", "test-management-key")
+		recorder := httptest.NewRecorder()
+		server.engine.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("%s status = %d, want 404 body=%s", target.path, recorder.Code, recorder.Body.String())
+		}
+	}
+
+	for _, path := range []string{
+		"/v0/management/api-keys",
+		"/v0/management/router/schemas/upstream-types",
+	} {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set("X-Management-Key", "test-management-key")
+		recorder := httptest.NewRecorder()
+		server.engine.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("%s status = %d, want 200 body=%s", path, recorder.Code, recorder.Body.String())
+		}
+	}
+}
+
 func TestNewServerWithPluginHostInjectsHandlerInterceptors(t *testing.T) {
 	host := pluginhost.New()
 	server := newTestServerWithOptions(t, WithPluginHost(host))

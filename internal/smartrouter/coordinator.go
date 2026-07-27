@@ -31,6 +31,8 @@ type AttemptExecutor interface {
 // mutate the request freely.
 type AttemptRequest struct {
 	Selection     Selection
+	PublicModel   string
+	AffinityKey   string
 	EntryProtocol config.RouterProtocol
 	Endpoint      string
 	Body          []byte
@@ -46,8 +48,7 @@ type AttemptResponse struct {
 }
 
 // ExecutionPolicy captures the retry matrix for one capability and stream
-// mode. Phase 3 implements only the text non-stream policy; streaming and
-// image policies are added by later phases.
+// mode.
 type ExecutionPolicy struct {
 	Capability           config.RouterCapability
 	Stream               bool
@@ -57,8 +58,11 @@ type ExecutionPolicy struct {
 // ExecutionPolicyFor selects the retry policy for a capability and stream
 // mode. Unimplemented combinations return ErrExecutionPolicyUnavailable.
 func ExecutionPolicyFor(capability config.RouterCapability, stream bool) (ExecutionPolicy, error) {
-	if capability == config.RouterCapabilityText && !stream {
-		return ExecutionPolicy{Capability: capability, MaxProtocolFailovers: 1}, nil
+	if capability == config.RouterCapabilityText {
+		return ExecutionPolicy{Capability: capability, Stream: stream, MaxProtocolFailovers: 1}, nil
+	}
+	if capability == config.RouterCapabilityImage && !stream {
+		return ExecutionPolicy{Capability: capability}, nil
 	}
 	return ExecutionPolicy{}, fmt.Errorf("%w: capability %q stream=%t", ErrExecutionPolicyUnavailable, capability, stream)
 }
@@ -102,6 +106,8 @@ type ExecutionResult struct {
 	Success          bool
 	FailureCategory  FailureCategory
 	Attempts         []AttemptRecord
+	Usage            *CanonicalUsage
+	UsageMissing     bool
 }
 
 // ExecutionError is the safe upstream error returned when execution fails. It
@@ -142,6 +148,12 @@ func (c *Coordinator) Execute(ctx context.Context, request ExecutionRequest) (*A
 		return nil, result, fmt.Errorf("execute router request: %w", ErrExecutorNotConfigured)
 	}
 
+	if request.Stream {
+		// Streaming requests belong to StreamCoordinator, which owns the
+		// commitment rules that this path cannot honor.
+		return nil, result, fmt.Errorf("%w: non-stream execution requires a non-streaming request", ErrStreamModeMismatch)
+	}
+
 	plan, err := c.selector.Begin(SelectionRequest{
 		PublicModel: request.PublicModel,
 		AffinityKey: request.AffinityKey,
@@ -152,7 +164,7 @@ func (c *Coordinator) Execute(ctx context.Context, request ExecutionRequest) (*A
 	result.SnapshotRevision = plan.SnapshotRevision()
 
 	group := plan.ModelGroup()
-	policy, err := ExecutionPolicyFor(group.Capability, request.Stream)
+	policy, err := ExecutionPolicyFor(group.Capability, false)
 	if err != nil {
 		return nil, result, err
 	}
@@ -197,6 +209,8 @@ func (c *Coordinator) Execute(ctx context.Context, request ExecutionRequest) (*A
 		switch outcome.decision {
 		case decisionSuccess:
 			result.Success = true
+			result.Usage, _ = canonicalUsageFromJSON(request.EntryProtocol, outcome.response.Body)
+			result.UsageMissing = result.Usage == nil
 			return cloneAttemptResponse(outcome.response), result, nil
 		case decisionCancelled:
 			return nil, result, cancellationError(ctx, len(result.Attempts))
@@ -271,7 +285,10 @@ func (p ExecutionPolicy) classifyAttempt(ctx context.Context, response AttemptRe
 		return attemptOutcome{decision: decisionCancelled, category: FailureCancelled, statusCode: statusCode}
 	}
 	if execErr != nil {
-		// Transport failure before response headers.
+		if p.Capability == config.RouterCapabilityImage {
+			return attemptOutcome{decision: decisionTerminal, category: FailureImageAmbiguous}
+		}
+		// Text transport failures before response headers may fail over.
 		return attemptOutcome{decision: decisionRetry, category: FailureTransient}
 	}
 
@@ -280,26 +297,17 @@ func (p ExecutionPolicy) classifyAttempt(ctx context.Context, response AttemptRe
 			if err := validator(response.Body); err != nil {
 				// Malformed success. The validator error is dropped because it
 				// may quote the response body.
+				if p.Capability == config.RouterCapabilityImage {
+					return attemptOutcome{decision: decisionTerminal, category: FailureImageAmbiguous, statusCode: statusCode}
+				}
 				return attemptOutcome{decision: decisionRetry, category: FailureProtocol, statusCode: statusCode}
 			}
 		}
 		return attemptOutcome{decision: decisionSuccess, statusCode: statusCode, response: response}
 	}
 
-	switch statusCode {
-	case 401, 403:
-		return attemptOutcome{decision: decisionRetry, category: FailureAuth, statusCode: statusCode}
-	case 429:
-		retryAfter, _ := ParseRetryAfter(response.Headers.Get("Retry-After"), now)
-		return attemptOutcome{decision: decisionRetry, category: FailureRateLimit, statusCode: statusCode, retryAfter: retryAfter}
-	case 408, 500, 502, 503, 504:
-		return attemptOutcome{decision: decisionRetry, category: FailureTransient, statusCode: statusCode}
-	case 400, 404, 409, 422:
-		return attemptOutcome{decision: decisionTerminal, category: FailureClient, statusCode: statusCode}
-	default:
-		// Every other status is terminal for the text non-stream policy.
-		return attemptOutcome{decision: decisionTerminal, category: FailureClient, statusCode: statusCode}
-	}
+	// Every status outside the retry matrix is terminal for the text policies.
+	return p.classifyStatus(statusCode, response.Headers, now)
 }
 
 // validateExecutionTarget checks endpoint and capability support before the
@@ -356,6 +364,8 @@ func buildAttemptRequest(request ExecutionRequest, endpoint string, selection Se
 	attemptSelection.Upstream = cloneUpstream(selection.Upstream)
 	return AttemptRequest{
 		Selection:     attemptSelection,
+		PublicModel:   request.PublicModel,
+		AffinityKey:   request.AffinityKey,
 		EntryProtocol: request.EntryProtocol,
 		Endpoint:      endpoint,
 		Body:          cloneBytes(request.Body),

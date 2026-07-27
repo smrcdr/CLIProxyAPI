@@ -3,12 +3,43 @@ package responses
 import (
 	"encoding/base64"
 	"strings"
+	"sync"
 	"testing"
 
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/tidwall/gjson"
 	"google.golang.org/protobuf/encoding/protowire"
 )
+
+func TestConvertOpenAIResponsesRequestToClaude_InitializesRequestIdentityConcurrently(t *testing.T) {
+	const workers = 32
+	ids := make(chan string, workers)
+	var wait sync.WaitGroup
+	for range workers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			result := ConvertOpenAIResponsesRequestToClaude("claude-test", []byte(`{"input":"hi"}`), false)
+			ids <- gjson.GetBytes(result, "metadata.user_id").String()
+		}()
+	}
+	wait.Wait()
+	close(ids)
+
+	var expected string
+	for id := range ids {
+		if id == "" {
+			t.Fatal("metadata.user_id is empty")
+		}
+		if expected == "" {
+			expected = id
+			continue
+		}
+		if id != expected {
+			t.Fatalf("metadata.user_id = %q, want stable value %q", id, expected)
+		}
+	}
+}
 
 func TestConvertOpenAIResponsesRequestToClaude_PreservesSystemInstructions(t *testing.T) {
 	raw := []byte(`{"instructions":"from instructions","input":[{"type":"message","role":"system","content":[{"type":"input_text","text":"from input"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`)

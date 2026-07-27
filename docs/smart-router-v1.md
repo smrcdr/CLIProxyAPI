@@ -174,7 +174,29 @@ upstream protocol when a registered translator supports the conversion.
 
 An upstream is configured once and reused by any number of model groups.
 
-### 8.1 Upstream fields
+### 8.1 Network policy
+
+Public HTTPS upstreams are allowed by default. HTTP and non-public network
+targets require explicit router-level policy:
+
+```yaml
+network-policy:
+  allow-http: true
+  allowed-private-hosts:
+    - codex-pool
+  allowed-private-cidrs:
+    - 172.16.0.0/12
+  allowed-redirect-hosts: []
+```
+
+`allowed-private-hosts` contains exact DNS names without schemes, ports, IP
+addresses, or wildcards. `allowed-private-cidrs` accepts only subnets of known
+private, loopback, carrier-grade NAT, or link-local ranges. Runtime DNS answers
+are checked before every request. Cross-origin redirects are rejected unless
+the destination hostname is explicitly allowlisted; HTTPS-to-HTTP downgrades
+remain forbidden.
+
+### 8.2 Upstream fields
 
 ```yaml
 id: codex-pool-eu
@@ -201,6 +223,8 @@ health-check:
   interval: 30s
   unhealthy-threshold: 3
   healthy-threshold: 2
+trusted-pool: true
+forward-smartapi-affinity: true
 ```
 
 Required fields:
@@ -224,7 +248,7 @@ An OpenAI-compatible endpoint that supports both Chat Completions and Responses
 may declare both endpoint capabilities. Protocol describes the preferred native
 format, not the public format accepted by SmartRouter.
 
-### 8.2 Secret handling
+### 8.3 Secret handling
 
 - Management responses never return secret values.
 - A secret update is write-only.
@@ -237,7 +261,7 @@ format, not the public format accepted by SmartRouter.
 - Deleting an upstream deletes its secret only after no model route references
   the upstream.
 
-### 8.3 Dynamic upstream schemas
+### 8.4 Dynamic upstream schemas
 
 The management API returns an allowlisted schema for every upstream type. The
 admin frontend renders fields from this schema instead of hardcoding provider
@@ -313,22 +337,19 @@ cannot be freely retried.
 
 ## 10. Internal trust and affinity
 
-SmartAPIV2 sends:
-
-- `X-SmartAPI-Request-Id`
-- `X-SmartAPI-Client-Fingerprint`
-- `X-SmartAPI-Internal-Key`
-
-The fingerprint is a stable HMAC derived by SmartAPIV2. It is not the raw public
-API key or user ID.
+SmartAPIV2 sends `X-SmartAPI-Affinity-Key`, a stable HMAC derived from the
+client identity. It is not the raw public API key or user ID.
 
 SmartRouter may use the fingerprint for route affinity and forwards it only to
-trusted account-pool upstreams marked `forward-smartapi-affinity: true`.
+trusted account-pool upstreams marked with both `trusted-pool: true` and
+`forward-smartapi-affinity: true`. A direct external upstream cannot enable
+internal affinity forwarding.
 
 Untrusted direct upstreams never receive SmartAPI internal headers.
 
-Requests from untrusted callers cannot set or override these headers. Public
-responses must not contain them.
+Other caller-supplied `X-SmartAPI-*`, `X-SmartCLI-*`, and `X-SmartRouter-*`
+headers are rejected before any upstream attempt. Public responses from
+SmartAPIV2 must not contain internal router diagnostics.
 
 ## 11. Routing lifecycle
 
@@ -671,6 +692,13 @@ Internal diagnostic headers may include:
 
 SmartAPIV2 stores these for admin diagnostics and strips them from public
 responses.
+
+The authenticated router management API also exposes:
+
+- `GET/PATCH /v0/management/router/network-policy`
+- `GET /v0/management/router/metrics`
+- route state with transport health, circuit transitions, safe timestamps,
+  status classes, and counters
 
 Logs never contain:
 

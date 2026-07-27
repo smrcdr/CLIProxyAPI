@@ -250,6 +250,13 @@ func rejectUnsupportedImagesModel(c *gin.Context, model string) bool {
 	return true
 }
 
+func (h *OpenAIAPIHandler) rejectUnsupportedImagesGenerationModel(c *gin.Context, model string) bool {
+	if h != nil && h.BaseAPIHandler != nil && h.BaseAPIHandler.HandlesSmartRouterImageModel(model) {
+		return false
+	}
+	return rejectUnsupportedImagesModel(c, model)
+}
+
 func normalizeImagesResponseFormat(responseFormat string) string {
 	if strings.EqualFold(strings.TrimSpace(responseFormat), "url") {
 		return "url"
@@ -607,7 +614,7 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 	if imageModel == "" {
 		imageModel = defaultImagesToolModel
 	}
-	if rejectUnsupportedImagesModel(c, imageModel) {
+	if h.rejectUnsupportedImagesGenerationModel(c, imageModel) {
 		return
 	}
 
@@ -628,6 +635,11 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 	}
 	stream := gjson.GetBytes(rawJSON, "stream").Bool()
 
+	if h != nil && h.BaseAPIHandler != nil && h.BaseAPIHandler.HandlesSmartRouterImageModel(imageModel) {
+		imageReq := buildOpenAICompatImagesJSONRequest(rawJSON, imageModel, stream)
+		h.handleRoutedImages(c, imageReq, imageModel, stream)
+		return
+	}
 	if isCodexImagesToolModel(imageModel) {
 		imageReq := buildOpenAICompatImagesJSONRequest(rawJSON, imageModel, stream)
 		h.handleRoutedImages(c, imageReq, imageModel, stream)

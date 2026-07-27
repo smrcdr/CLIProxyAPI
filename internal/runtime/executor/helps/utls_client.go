@@ -185,9 +185,11 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 			utls:     utlsRT,
 			fallback: standardTransport,
 		},
+		CheckRedirect: rejectCrossOriginRedirect,
 	}
 	if timeout > 0 {
 		client.Timeout = timeout
 	}
+	applyRouterNetworkPolicy(client, cfg)
 	return client
 }

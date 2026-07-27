@@ -155,6 +155,73 @@ func TestOpenAICompatExecutorImagesGenerationsPassthrough(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatExecutorImagesErrorDoesNotExposeUpstreamBody(t *testing.T) {
+	const secretBody = `{"error":{"message":"secret-b64-payload"}}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(secretBody))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "upstream-image",
+		Payload: []byte(`{"model":"compat-image","prompt":"draw","n":1}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-image"),
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestPathMetadataKey: "/v1/images/generations",
+		},
+	})
+	if err == nil {
+		t.Fatal("Execute unexpectedly succeeded")
+	}
+	if strings.Contains(err.Error(), "secret-b64-payload") || strings.Contains(err.Error(), secretBody) {
+		t.Fatalf("upstream image body leaked through error: %v", err)
+	}
+	statusError, ok := err.(interface{ StatusCode() int })
+	if !ok || statusError.StatusCode() != http.StatusTooManyRequests {
+		t.Fatalf("error = %T %v, want status 429", err, err)
+	}
+}
+
+func TestOpenAICompatExecutorImagesRejectsOversizedResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, strings.Repeat("x", maxOpenAICompatImageResponseBytes+1))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "upstream-image",
+		Payload: []byte(`{"model":"compat-image","prompt":"draw","n":1}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-image"),
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestPathMetadataKey: "/v1/images/generations",
+		},
+	})
+	if err == nil {
+		t.Fatal("Execute unexpectedly accepted oversized response")
+	}
+	if !strings.Contains(err.Error(), "exceeds 32 MiB") {
+		t.Fatalf("error = %v, want size limit failure", err)
+	}
+	statusError, ok := err.(interface{ StatusCode() int })
+	if !ok || statusError.StatusCode() != http.StatusBadGateway {
+		t.Fatalf("error = %T %v, want status 502", err, err)
+	}
+}
+
 func TestOpenAICompatExecutorImagesGenerationsStreamsUpstream(t *testing.T) {
 	var gotPath string
 	var gotBody []byte

@@ -537,22 +537,12 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			completed, _ = sjson.SetRawBytes(completed, "response.output", []byte(gjson.GetBytes(outputsWrapper, "arr").Raw))
 		}
 
-		reasoningTokens := int64(0)
-		if st.ReasoningBuf.Len() > 0 {
-			reasoningTokens = int64(st.ReasoningBuf.Len() / 4)
-		}
-		usagePresent := st.Usage.HasUsage || reasoningTokens > 0
-		if usagePresent {
+		if st.Usage.HasUsage {
 			inputTokens, outputTokens, totalTokens, cachedTokens := st.Usage.OpenAIResponsesUsage()
 			completed, _ = sjson.SetBytes(completed, "response.usage.input_tokens", inputTokens)
 			completed, _ = sjson.SetBytes(completed, "response.usage.input_tokens_details.cached_tokens", cachedTokens)
 			completed, _ = sjson.SetBytes(completed, "response.usage.output_tokens", outputTokens)
-			if reasoningTokens > 0 {
-				completed, _ = sjson.SetBytes(completed, "response.usage.output_tokens_details.reasoning_tokens", reasoningTokens)
-			}
-			if totalTokens > 0 || st.Usage.HasUsage {
-				completed, _ = sjson.SetBytes(completed, "response.usage.total_tokens", totalTokens)
-			}
+			completed, _ = sjson.SetBytes(completed, "response.usage.total_tokens", totalTokens)
 		}
 		out = append(out, emitEvent("response.completed", completed))
 	}
@@ -825,13 +815,6 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	out, _ = sjson.SetBytes(out, "usage.input_tokens_details.cached_tokens", cachedTokens)
 	out, _ = sjson.SetBytes(out, "usage.output_tokens", outputTokens)
 	out, _ = sjson.SetBytes(out, "usage.total_tokens", totalTokens)
-	if reasoningBuf.Len() > 0 {
-		// Rough estimate similar to chat completions
-		reasoningTokens := int64(len(reasoningBuf.String()) / 4)
-		if reasoningTokens > 0 {
-			out, _ = sjson.SetBytes(out, "usage.output_tokens_details.reasoning_tokens", reasoningTokens)
-		}
-	}
 
 	return out
 }

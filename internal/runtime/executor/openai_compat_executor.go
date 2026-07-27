@@ -30,6 +30,7 @@ const (
 	openAICompatImagesGenerationsPath       = "/images/generations"
 	openAICompatImagesEditsPath             = "/images/edits"
 	openAICompatDefaultImageEndpoint        = openAICompatImagesGenerationsPath
+	maxOpenAICompatImageResponseBytes       = 32 << 20
 	openAICompatMultipartMemory       int64 = 32 << 20
 )
 
@@ -39,15 +40,38 @@ const (
 type OpenAICompatExecutor struct {
 	provider string
 	cfg      *config.Config
+	format   sdktranslator.Format
 }
 
 // NewOpenAICompatExecutor creates an executor bound to a provider key (e.g., "openrouter").
 func NewOpenAICompatExecutor(provider string, cfg *config.Config) *OpenAICompatExecutor {
-	return &OpenAICompatExecutor{provider: provider, cfg: cfg}
+	return NewOpenAICompatExecutorForFormat(provider, cfg, sdktranslator.FormatOpenAI)
+}
+
+// NewOpenAICompatExecutorForFormat creates an executor for a specific OpenAI
+// wire format. Router upstreams use this to distinguish Chat Completions from
+// Responses without creating a second HTTP pipeline.
+func NewOpenAICompatExecutorForFormat(provider string, cfg *config.Config, format sdktranslator.Format) *OpenAICompatExecutor {
+	if format != sdktranslator.FormatOpenAIResponse {
+		format = sdktranslator.FormatOpenAI
+	}
+	return &OpenAICompatExecutor{provider: provider, cfg: cfg, format: format}
 }
 
 // Identifier implements cliproxyauth.ProviderExecutor.
 func (e *OpenAICompatExecutor) Identifier() string { return e.provider }
+
+// RequestToFormat reports the route's configured upstream wire format.
+func (e *OpenAICompatExecutor) RequestToFormat(cliproxyexecutor.Request, cliproxyexecutor.Options) sdktranslator.Format {
+	return e.requestFormat()
+}
+
+func (e *OpenAICompatExecutor) requestFormat() sdktranslator.Format {
+	if e != nil && e.format == sdktranslator.FormatOpenAIResponse {
+		return sdktranslator.FormatOpenAIResponse
+	}
+	return sdktranslator.FormatOpenAI
+}
 
 // PrepareRequest injects OpenAI-compatible credentials into the outgoing HTTP request.
 func (e *OpenAICompatExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
@@ -100,10 +124,13 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
-	to := sdktranslator.FromString("openai")
+	to := e.requestFormat()
 	endpoint := "/chat/completions"
+	if to == sdktranslator.FormatOpenAIResponse {
+		endpoint = "/responses"
+	}
 	if opts.Alt == "responses/compact" {
-		to = sdktranslator.FromString("openai-response")
+		to = sdktranslator.FormatOpenAIResponse
 		endpoint = "/responses/compact"
 	}
 	originalPayloadSource := req.Payload
@@ -271,17 +298,21 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 	}()
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 
-	body, errRead := io.ReadAll(httpResp.Body)
+	body, errRead := io.ReadAll(io.LimitReader(httpResp.Body, maxOpenAICompatImageResponseBytes+1))
 	if errRead != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 		err = errRead
 		return resp, err
 	}
-	helps.AppendAPIResponseChunk(ctx, e.cfg, body)
+	if len(body) > maxOpenAICompatImageResponseBytes {
+		err = statusErr{code: http.StatusBadGateway, msg: "openai compat executor: image response exceeds 32 MiB"}
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
+	}
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), body))
-		err = statusErr{code: httpResp.StatusCode, msg: string(body)}
+		helps.LogWithRequestID(ctx).Debugf("image request failed with upstream status %d", httpResp.StatusCode)
+		err = statusErr{code: httpResp.StatusCode, msg: "openai compat executor: upstream image request failed"}
 		return resp, err
 	}
 
@@ -309,7 +340,11 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
-	to := sdktranslator.FromString("openai")
+	to := e.requestFormat()
+	endpoint := "/chat/completions"
+	if to == sdktranslator.FormatOpenAIResponse {
+		endpoint = "/responses"
+	}
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
@@ -330,12 +365,14 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		translated = helps.ApplyOpenAIModelInstruction(e.cfg, requestedModel, baseModel, translated)
 	}
 
-	// Request usage data in the final streaming chunk so that token statistics
-	// are captured even when the upstream is an OpenAI-compatible provider.
-	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
+	// Chat Completions requires an explicit usage option. Responses carries
+	// usage in response.completed and does not accept stream_options.
+	if to == sdktranslator.FormatOpenAI {
+		translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
+	}
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
-	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
+	url := strings.TrimSuffix(baseURL, "/") + endpoint
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 	if err != nil {
 		return nil, err
@@ -532,7 +569,7 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		body, errRead := io.ReadAll(httpResp.Body)
+		body, errRead := io.ReadAll(io.LimitReader(httpResp.Body, maxOpenAICompatImageResponseBytes+1))
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("openai compat executor: close response body error: %v", errClose)
 		}
@@ -540,9 +577,13 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 			return nil, errRead
 		}
-		helps.AppendAPIResponseChunk(ctx, e.cfg, body)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), body))
-		return nil, statusErr{code: httpResp.StatusCode, msg: string(body)}
+		if len(body) > maxOpenAICompatImageResponseBytes {
+			err = statusErr{code: http.StatusBadGateway, msg: "openai compat executor: image response exceeds 32 MiB"}
+			helps.RecordAPIResponseError(ctx, e.cfg, err)
+			return nil, err
+		}
+		helps.LogWithRequestID(ctx).Debugf("streaming image request failed with upstream status %d", httpResp.StatusCode)
+		return nil, statusErr{code: httpResp.StatusCode, msg: "openai compat executor: upstream image request failed"}
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)
@@ -559,7 +600,6 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 			n, errRead := httpResp.Body.Read(buffer)
 			if n > 0 {
 				chunk := bytes.Clone(buffer[:n])
-				helps.AppendAPIResponseChunk(ctx, e.cfg, chunk)
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunk}:
 				case <-ctx.Done():

@@ -1,0 +1,155 @@
+# Dev-only SmartRouter seed configuration. Runtime keys replace the two
+# placeholders during deployment and are never committed.
+host: ""
+port: 8317
+service-role: router
+auth-dir: "/root/.cli-proxy-api"
+
+remote-management:
+  allow-remote: true
+  secret-key: "__ROUTER_MANAGEMENT_KEY__"
+  disable-control-panel: true
+
+api-keys:
+  - "__ROUTER_INFERENCE_KEY__"
+
+debug: false
+logging-to-file: false
+usage-statistics-enabled: true
+request-retry: 0
+max-retry-credentials: 0
+max-retry-interval: 0
+
+router:
+  network-policy:
+    allow-http: true
+    allowed-private-hosts:
+      - router-fake
+      - cliproxyapi-dev
+    allowed-private-cidrs: []
+    allowed-redirect-hosts: []
+  upstreams:
+    - id: fake-responses-primary
+      name: Fake OpenAI Responses primary
+      enabled: true
+      protocol: openai-responses
+      base-url: "http://router-fake:9000/v1"
+      auth:
+        type: none
+      headers:
+        X-Fake-Target: primary
+      capabilities:
+        endpoints: [responses, chat-completions, messages]
+        streaming: true
+        tools: true
+        vision-input: true
+        image-generation: false
+      health-check:
+        mode: http
+        path: /healthz
+        interval: 30s
+        unhealthy-threshold: 3
+        healthy-threshold: 2
+    - id: fake-anthropic-backup
+      name: Fake Anthropic backup
+      enabled: true
+      protocol: anthropic-messages
+      base-url: "http://router-fake:9000"
+      auth:
+        type: none
+      headers:
+        X-Fake-Target: backup
+      capabilities:
+        endpoints: [responses, chat-completions, messages]
+        streaming: true
+        tools: true
+        vision-input: true
+        image-generation: false
+      health-check:
+        mode: http
+        path: /healthz
+        interval: 30s
+        unhealthy-threshold: 3
+        healthy-threshold: 2
+    - id: fake-image-primary
+      name: Fake image primary
+      enabled: true
+      protocol: openai-responses
+      base-url: "http://router-fake:9000/v1"
+      auth:
+        type: none
+      headers:
+        X-Fake-Target: image-primary
+      capabilities:
+        endpoints: [responses, images]
+        streaming: false
+        tools: false
+        vision-input: false
+        image-generation: true
+      health-check:
+        mode: http
+        path: /healthz
+        interval: 30s
+        unhealthy-threshold: 3
+        healthy-threshold: 2
+    - id: fake-image-backup
+      name: Fake image backup
+      enabled: true
+      protocol: openai-responses
+      base-url: "http://router-fake:9000/v1"
+      auth:
+        type: none
+      headers:
+        X-Fake-Target: image-backup
+      capabilities:
+        endpoints: [responses, images]
+        streaming: false
+        tools: false
+        vision-input: false
+        image-generation: true
+      health-check:
+        mode: http
+        path: /healthz
+        interval: 30s
+        unhealthy-threshold: 3
+        healthy-threshold: 2
+  model-groups:
+    - id: router-text-dev
+      public-model: router-text-dev
+      enabled: true
+      capability: text
+      selection:
+        strategy: weighted-affinity
+        affinity-ttl: 1h
+      routes:
+        - id: router-text-primary
+          upstream-id: fake-responses-primary
+          upstream-model: fake-text-model
+          priority: 100
+          weight: 100
+          enabled: true
+        - id: router-text-backup
+          upstream-id: fake-anthropic-backup
+          upstream-model: fake-text-model
+          priority: 50
+          weight: 100
+          enabled: true
+    - id: router-image-dev
+      public-model: router-image-dev
+      enabled: true
+      capability: image
+      selection:
+        strategy: weighted-round-robin
+      routes:
+        - id: router-image-primary
+          upstream-id: fake-image-primary
+          upstream-model: fake-image-model
+          priority: 100
+          weight: 100
+          enabled: true
+        - id: router-image-backup
+          upstream-id: fake-image-backup
+          upstream-model: fake-image-model
+          priority: 50
+          weight: 100
+          enabled: true

@@ -43,6 +43,14 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	if maxTokens := root.Get("max_output_tokens"); maxTokens.Exists() {
 		out, _ = sjson.SetBytes(out, "max_tokens", maxTokens.Int())
 	}
+	if serviceTier := root.Get("service_tier"); serviceTier.Exists() && serviceTier.Type == gjson.String {
+		out, _ = sjson.SetBytes(out, "service_tier", serviceTier.String())
+	}
+	if format := root.Get("response_format"); format.Exists() {
+		out, _ = sjson.SetRawBytes(out, "response_format", responsesFormatToChat(format))
+	} else if format := root.Get("text.format"); format.Exists() {
+		out, _ = sjson.SetRawBytes(out, "response_format", responsesFormatToChat(format))
+	}
 
 	if parallelToolCalls := root.Get("parallel_tool_calls"); parallelToolCalls.Exists() {
 		out, _ = sjson.SetBytes(out, "parallel_tool_calls", parallelToolCalls.Bool())
@@ -336,9 +344,38 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 	// Convert tool_choice if present
 	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
-		out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(toolChoice.Raw))
+		out, _ = sjson.SetRawBytes(out, "tool_choice", responsesToolChoiceToChat(toolChoice))
 	}
 
+	return out
+}
+
+func responsesToolChoiceToChat(choice gjson.Result) []byte {
+	if choice.Type != gjson.JSON || choice.Get("type").String() != "function" {
+		return []byte(choice.Raw)
+	}
+	name := choice.Get("name").String()
+	if name == "" {
+		name = choice.Get("function.name").String()
+	}
+	if name == "" {
+		return []byte(choice.Raw)
+	}
+	out := []byte(`{"type":"function","function":{"name":""}}`)
+	out, _ = sjson.SetBytes(out, "function.name", name)
+	return out
+}
+
+func responsesFormatToChat(format gjson.Result) []byte {
+	if format.Get("type").String() != "json_schema" || format.Get("json_schema").Exists() {
+		return []byte(format.Raw)
+	}
+	out := []byte(`{"type":"json_schema","json_schema":{}}`)
+	for _, field := range []string{"name", "description", "schema", "strict"} {
+		if value := format.Get(field); value.Exists() {
+			out, _ = sjson.SetRawBytes(out, "json_schema."+field, []byte(value.Raw))
+		}
+	}
 	return out
 }
 

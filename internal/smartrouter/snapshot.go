@@ -19,6 +19,7 @@ type Upstream struct {
 	Headers                 map[string]string
 	Capabilities            config.RouterCapabilities
 	HealthCheck             HealthCheck
+	TrustedPool             bool
 	ForwardSmartAPIAffinity bool
 }
 
@@ -106,6 +107,7 @@ func CompileSnapshot(cfg *config.Config, revision uint64) (*Snapshot, error) {
 				UnhealthyThreshold: source.HealthCheck.UnhealthyThreshold,
 				HealthyThreshold:   source.HealthCheck.HealthyThreshold,
 			},
+			TrustedPool:             source.TrustedPool,
 			ForwardSmartAPIAffinity: source.ForwardSmartAPIAffinity,
 		}
 	}
@@ -157,7 +159,14 @@ func CompileSnapshot(cfg *config.Config, revision uint64) (*Snapshot, error) {
 }
 
 func EmptySnapshot() *Snapshot {
+	return EmptySnapshotAtRevision(0)
+}
+
+// EmptySnapshotAtRevision creates an empty routing view that can participate
+// in monotonic snapshot reloads for non-router service roles.
+func EmptySnapshotAtRevision(revision uint64) *Snapshot {
 	return &Snapshot{
+		revision:       revision,
 		upstreams:      make(map[string]Upstream),
 		groupsByID:     make(map[string]ModelGroup),
 		groupIDByModel: make(map[string]string),

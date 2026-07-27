@@ -273,12 +273,12 @@ func TestConvertInteractionsRequestToOpenAIResponsesWithStringFunctionArguments(
 }
 
 func TestConvertInteractionsRequestToOpenAIResponsesPreservesExpressibleFields(t *testing.T) {
-	out := ConvertInteractionsRequestToOpenAIResponses("gpt-test", []byte(`{"model":"gpt-test","tool_choice":{"type":"function","function":{"name":"lookup"}},"response_modalities":["text","image"],"service_tier":"priority","store":true,"background":true,"webhook_config":{"url":"https://example.com"},"input":"hi"}`), false)
+	out := ConvertInteractionsRequestToOpenAIResponses("gpt-test", []byte(`{"model":"gpt-test","generation_config":{"max_output_tokens":321},"tool_choice":{"type":"function","function":{"name":"lookup"}},"response_modalities":["text","image"],"service_tier":"priority","store":true,"background":true,"webhook_config":{"url":"https://example.com"},"input":"hi"}`), false)
 	if got := gjson.GetBytes(out, "tool_choice.type").String(); got != "function" {
 		t.Fatalf("tool_choice.type = %q, want function. Output: %s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "tool_choice.function.name").String(); got != "lookup" {
-		t.Fatalf("tool_choice.function.name = %q, want lookup. Output: %s", got, string(out))
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "lookup" {
+		t.Fatalf("tool_choice.name = %q, want lookup. Output: %s", got, string(out))
 	}
 	if got := gjson.GetBytes(out, "modalities.0").String(); got != "text" {
 		t.Fatalf("modalities.0 = %q, want text. Output: %s", got, string(out))
@@ -289,9 +289,71 @@ func TestConvertInteractionsRequestToOpenAIResponsesPreservesExpressibleFields(t
 	if got := gjson.GetBytes(out, "service_tier").String(); got != "priority" {
 		t.Fatalf("service_tier = %q, want priority. Output: %s", got, string(out))
 	}
+	if got := gjson.GetBytes(out, "max_output_tokens").Int(); got != 321 {
+		t.Fatalf("max_output_tokens = %d, want 321. Output: %s", got, string(out))
+	}
 	for _, path := range []string{"store", "background", "webhook_config"} {
 		if gjson.GetBytes(out, path).Exists() {
 			t.Fatalf("%s should not be forwarded. Output: %s", path, string(out))
 		}
+	}
+}
+
+func TestInteractionsResponsesRequestNormalizesStructuredOutput(t *testing.T) {
+	responses := ConvertInteractionsRequestToOpenAIResponses(
+		"gpt-test",
+		[]byte(`{"model":"gpt-test","input":"hi","response_format":{"type":"json_schema","json_schema":{"name":"answer","schema":{"type":"object"},"strict":true}}}`),
+		false,
+	)
+	if got := gjson.GetBytes(responses, "text.format.name").String(); got != "answer" {
+		t.Fatalf("Responses format name = %q. Output: %s", got, responses)
+	}
+	if !gjson.GetBytes(responses, "text.format.schema").Exists() || gjson.GetBytes(responses, "text.format.json_schema").Exists() {
+		t.Fatalf("Responses format has wrong shape: %s", responses)
+	}
+
+	interactions := ConvertOpenAIResponsesRequestToInteractions(
+		"gpt-test",
+		[]byte(`{"model":"gpt-test","input":"hi","text":{"format":{"type":"json_schema","name":"answer","schema":{"type":"object"},"strict":true}}}`),
+		false,
+	)
+	if got := gjson.GetBytes(interactions, "response_format.json_schema.name").String(); got != "answer" {
+		t.Fatalf("Interactions format name = %q. Output: %s", got, interactions)
+	}
+	if !gjson.GetBytes(interactions, "response_format.json_schema.schema").Exists() {
+		t.Fatalf("Interactions format schema is missing: %s", interactions)
+	}
+}
+
+func TestInteractionsResponsesRequestNormalizesToolChoice(t *testing.T) {
+	interactions := ConvertOpenAIResponsesRequestToInteractions(
+		"gpt-test",
+		[]byte(`{"model":"gpt-test","input":"hi","tool_choice":{"type":"function","name":"lookup"}}`),
+		false,
+	)
+	if got := gjson.GetBytes(interactions, "generation_config.tool_choice.function.name").String(); got != "lookup" {
+		t.Fatalf("Interactions tool choice name = %q. Output: %s", got, interactions)
+	}
+
+	responses := ConvertInteractionsRequestToOpenAIResponses("gpt-test", interactions, false)
+	if got := gjson.GetBytes(responses, "tool_choice.name").String(); got != "lookup" {
+		t.Fatalf("Responses tool choice name = %q. Output: %s", got, responses)
+	}
+	if gjson.GetBytes(responses, "tool_choice.function").Exists() {
+		t.Fatalf("Responses tool choice retained Chat nesting: %s", responses)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToInteractionsPreservesGenerationFields(t *testing.T) {
+	out := ConvertOpenAIResponsesRequestToInteractions(
+		"gpt-test",
+		[]byte(`{"model":"gpt-test","input":"hi","max_output_tokens":654,"service_tier":"priority"}`),
+		false,
+	)
+	if got := gjson.GetBytes(out, "generation_config.max_output_tokens").Int(); got != 654 {
+		t.Fatalf("max_output_tokens = %d, want 654. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "service_tier").String(); got != "priority" {
+		t.Fatalf("service_tier = %q, want priority. Output: %s", got, string(out))
 	}
 }

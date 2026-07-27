@@ -128,6 +128,25 @@ func coordinatorForTest(t *testing.T, executor AttemptExecutor, routeCount int) 
 	return NewCoordinator(selector, executor), selector
 }
 
+func imageCoordinatorForTest(t *testing.T, executor AttemptExecutor, routeCount int) (*Coordinator, *Selector) {
+	t.Helper()
+	cfg := coordinatorTestConfig(routeCount)
+	cfg.Router.ModelGroups[0].Capability = config.RouterCapabilityImage
+	for index := range cfg.Router.Upstreams {
+		cfg.Router.Upstreams[index].Capabilities = config.RouterCapabilities{
+			Endpoints:       []string{config.RouterEndpointResponses, config.RouterEndpointImages},
+			ImageGeneration: true,
+		}
+	}
+	snapshot, err := CompileSnapshot(cfg, 1)
+	if err != nil {
+		t.Fatalf("CompileSnapshot() error = %v", err)
+	}
+	selector := NewSelector(NewSnapshotStore(snapshot), NewCircuitStore(DefaultCircuitPolicy()))
+	selector.now = func() time.Time { return coordinatorTestTime }
+	return NewCoordinator(selector, executor), selector
+}
+
 func textExecutionRequest() ExecutionRequest {
 	return ExecutionRequest{
 		RequestID:     "req-1",
@@ -139,6 +158,59 @@ func textExecutionRequest() ExecutionRequest {
 		Headers:       http.Header{"X-Test": []string{"yes"}},
 		Query:         url.Values{"beta": []string{"true"}},
 		BodyValidator: rejectBadBody,
+	}
+}
+
+func imageExecutionRequest() ExecutionRequest {
+	return ExecutionRequest{
+		RequestID:     "image-req-1",
+		PublicModel:   "model-x",
+		AffinityKey:   "image-affinity-1",
+		EntryProtocol: config.RouterProtocolOpenAIResponses,
+		Endpoint:      config.RouterEndpointImages,
+		Body:          []byte(`{"model":"model-x","prompt":"draw","n":1}`),
+		BodyValidator: rejectBadBody,
+	}
+}
+
+func TestCoordinatorReportsUsageOnlyFromSuccessfulAttempt(t *testing.T) {
+	executor := &fakeExecutor{script: []fakeAttempt{
+		{response: AttemptResponse{
+			StatusCode: http.StatusServiceUnavailable,
+			Body:       []byte(`{"usage":{"input_tokens":999,"output_tokens":999}}`),
+		}},
+		{response: AttemptResponse{
+			StatusCode: http.StatusOK,
+			Body:       []byte(`{"usage":{"input_tokens":11,"output_tokens":4,"total_tokens":15}}`),
+		}},
+	}}
+	coordinator, _ := coordinatorForTest(t, executor, 2)
+
+	_, result, err := coordinator.Execute(context.Background(), textExecutionRequest())
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result.UsageMissing || result.Usage == nil {
+		t.Fatalf("usage = %#v, missing = %t", result.Usage, result.UsageMissing)
+	}
+	assertUsageToken(t, "input", result.Usage.InputTokens, usageToken(11))
+	assertUsageToken(t, "output", result.Usage.OutputTokens, usageToken(4))
+	assertUsageToken(t, "total", result.Usage.TotalTokens, usageToken(15))
+}
+
+func TestCoordinatorMarksSuccessfulResponseWithoutUsage(t *testing.T) {
+	executor := &fakeExecutor{fallback: fakeAttempt{response: AttemptResponse{
+		StatusCode: http.StatusOK,
+		Body:       []byte(`{"id":"response_without_usage"}`),
+	}}}
+	coordinator, _ := coordinatorForTest(t, executor, 1)
+
+	_, result, err := coordinator.Execute(context.Background(), textExecutionRequest())
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !result.UsageMissing || result.Usage != nil {
+		t.Fatalf("usage = %#v, missing = %t", result.Usage, result.UsageMissing)
 	}
 }
 
@@ -320,6 +392,121 @@ func TestCoordinatorRetryMatrix(t *testing.T) {
 	}
 }
 
+func TestCoordinatorImageRetryMatrixAvoidsAmbiguousDuplicates(t *testing.T) {
+	tests := []struct {
+		name          string
+		first         fakeAttempt
+		wantFailover  bool
+		wantCategory  FailureCategory
+		wantStatus    int
+		wantSucceeded bool
+	}{
+		{
+			name:          "valid image succeeds",
+			first:         okAttempt(),
+			wantSucceeded: true,
+			wantStatus:    http.StatusOK,
+		},
+		{
+			name:         "401 safely fails over",
+			first:        statusAttempt(http.StatusUnauthorized, nil),
+			wantFailover: true,
+			wantCategory: FailureAuth,
+			wantStatus:   http.StatusUnauthorized,
+		},
+		{
+			name:         "403 safely fails over",
+			first:        statusAttempt(http.StatusForbidden, nil),
+			wantFailover: true,
+			wantCategory: FailureAuth,
+			wantStatus:   http.StatusForbidden,
+		},
+		{
+			name:         "429 safely fails over",
+			first:        statusAttempt(http.StatusTooManyRequests, http.Header{"Retry-After": []string{"60"}}),
+			wantFailover: true,
+			wantCategory: FailureRateLimit,
+			wantStatus:   http.StatusTooManyRequests,
+		},
+		{
+			name:         "transport failure is ambiguous",
+			first:        fakeAttempt{err: errors.New("connection reset")},
+			wantCategory: FailureImageAmbiguous,
+		},
+		{
+			name:         "timeout status is ambiguous",
+			first:        statusAttempt(http.StatusRequestTimeout, nil),
+			wantCategory: FailureImageAmbiguous,
+			wantStatus:   http.StatusRequestTimeout,
+		},
+		{
+			name:         "500 is ambiguous",
+			first:        statusAttempt(http.StatusInternalServerError, nil),
+			wantCategory: FailureImageAmbiguous,
+			wantStatus:   http.StatusInternalServerError,
+		},
+		{
+			name:         "503 is ambiguous",
+			first:        statusAttempt(http.StatusServiceUnavailable, nil),
+			wantCategory: FailureImageAmbiguous,
+			wantStatus:   http.StatusServiceUnavailable,
+		},
+		{
+			name:         "malformed success is ambiguous",
+			first:        fakeAttempt{response: AttemptResponse{StatusCode: http.StatusOK, Body: []byte("bad")}},
+			wantCategory: FailureImageAmbiguous,
+			wantStatus:   http.StatusOK,
+		},
+		{
+			name:         "validation status is terminal",
+			first:        statusAttempt(http.StatusUnprocessableEntity, nil),
+			wantCategory: FailureClient,
+			wantStatus:   http.StatusUnprocessableEntity,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			executor := &fakeExecutor{script: []fakeAttempt{test.first}, fallback: okAttempt()}
+			coordinator, _ := imageCoordinatorForTest(t, executor, 2)
+			response, result, err := coordinator.Execute(context.Background(), imageExecutionRequest())
+
+			if test.wantSucceeded {
+				if err != nil || response == nil || !result.Success || executor.callCount() != 1 {
+					t.Fatalf("Execute() = %#v, %v; calls = %d", result, err, executor.callCount())
+				}
+				return
+			}
+			if test.wantFailover {
+				if err != nil || response == nil || !result.Success || executor.callCount() != 2 {
+					t.Fatalf("Execute() = %#v, %v; calls = %d, want safe failover", result, err, executor.callCount())
+				}
+				if result.Attempts[0].FailureCategory != test.wantCategory || result.Attempts[0].StatusCode != test.wantStatus {
+					t.Fatalf("first attempt = %#v", result.Attempts[0])
+				}
+				return
+			}
+
+			if response != nil || result.Success || executor.callCount() != 1 {
+				t.Fatalf("ambiguous/terminal execution = %#v, response = %#v, calls = %d", result, response, executor.callCount())
+			}
+			var execErr *ExecutionError
+			if !errors.As(err, &execErr) {
+				t.Fatalf("Execute() error = %T %v, want *ExecutionError", err, err)
+			}
+			if execErr.Category != test.wantCategory || execErr.StatusCode != test.wantStatus {
+				t.Fatalf("execution error = %#v", execErr)
+			}
+		})
+	}
+}
+
+func TestExecutionPolicyRejectsStreamingImages(t *testing.T) {
+	if _, err := ExecutionPolicyFor(config.RouterCapabilityImage, true); !errors.Is(err, ErrExecutionPolicyUnavailable) {
+		t.Fatalf("ExecutionPolicyFor(image, stream) error = %v, want ErrExecutionPolicyUnavailable", err)
+	}
+}
+
 func TestCoordinatorPrimarySuccessAttemptDetails(t *testing.T) {
 	executor := &fakeExecutor{fallback: okAttempt()}
 	coordinator, _ := coordinatorForTest(t, executor, 2)
@@ -423,6 +610,32 @@ func TestCoordinatorCancellationDuringAttempt(t *testing.T) {
 	}
 	if status := selector.CircuitStatus("route-1"); status.State != CircuitClosed || status.FailureCount != 0 {
 		t.Fatalf("cancellation altered closed circuit: %#v", status)
+	}
+}
+
+func TestCoordinatorImageCancellationDuringAttemptDoesNotRetry(t *testing.T) {
+	executor := &fakeExecutor{script: []fakeAttempt{statusAttempt(http.StatusTooManyRequests, nil)}, fallback: okAttempt()}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	executor.hook = func(call int, _ AttemptRequest) {
+		if call == 0 {
+			cancel()
+		}
+	}
+	coordinator, selector := imageCoordinatorForTest(t, executor, 2)
+
+	response, result, err := coordinator.Execute(ctx, imageExecutionRequest())
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Execute() error = %v, want context.Canceled", err)
+	}
+	if response != nil || result.Success || executor.callCount() != 1 {
+		t.Fatalf("cancelled image execution = %#v, calls = %d", result, executor.callCount())
+	}
+	if len(result.Attempts) != 1 || result.Attempts[0].FailureCategory != FailureCancelled {
+		t.Fatalf("cancelled image attempts = %#v", result.Attempts)
+	}
+	if status := selector.CircuitStatus("route-1"); status.State != CircuitClosed || status.FailureCount != 0 {
+		t.Fatalf("image cancellation altered closed circuit: %#v", status)
 	}
 }
 
@@ -540,10 +753,12 @@ func TestCoordinatorValidatesEndpointAndMode(t *testing.T) {
 		t.Fatalf("Execute(empty endpoint) error = %v, want ErrEndpointNotSupported", err)
 	}
 
+	// Streaming is served by StreamCoordinator, so this path rejects it
+	// instead of reporting a missing policy.
 	streaming := textExecutionRequest()
 	streaming.Stream = true
-	if _, _, err := coordinator.Execute(context.Background(), streaming); !errors.Is(err, ErrExecutionPolicyUnavailable) {
-		t.Fatalf("Execute(stream) error = %v, want ErrExecutionPolicyUnavailable", err)
+	if _, _, err := coordinator.Execute(context.Background(), streaming); !errors.Is(err, ErrStreamModeMismatch) {
+		t.Fatalf("Execute(stream) error = %v, want ErrStreamModeMismatch", err)
 	}
 
 	if executor.callCount() != 0 {

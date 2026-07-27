@@ -35,6 +35,8 @@ type Selection struct {
 type Selector struct {
 	snapshots *SnapshotStore
 	circuits  *CircuitStore
+	health    *TransportHealthStore
+	metrics   *RouterMetrics
 	now       func() time.Time
 
 	snapshotMu   sync.RWMutex
@@ -70,9 +72,33 @@ func NewSelector(snapshots *SnapshotStore, circuits *CircuitStore) *Selector {
 	return &Selector{
 		snapshots:  snapshots,
 		circuits:   circuits,
+		health:     NewTransportHealthStore(),
+		metrics:    NewRouterMetrics(),
 		now:        time.Now,
 		roundRobin: make(map[roundRobinKey]uint64),
 	}
+}
+
+// HandlesModel reports whether the current snapshot contains an enabled model
+// group for the public model. It does not reserve or select a route.
+func (s *Selector) HandlesModel(publicModel string) bool {
+	return s.HandlesModelCapability(publicModel, "")
+}
+
+// HandlesModelCapability reports whether the current snapshot contains an
+// enabled model group for the public model and, when provided, capability.
+func (s *Selector) HandlesModelCapability(publicModel string, capability config.RouterCapability) bool {
+	if s == nil || s.snapshots == nil {
+		return false
+	}
+	s.snapshotMu.RLock()
+	snapshot := s.snapshots.Load()
+	s.snapshotMu.RUnlock()
+	if snapshot == nil {
+		return false
+	}
+	group, ok := snapshot.ModelGroupForModel(publicModel)
+	return ok && group.Enabled && (capability == "" || group.Capability == capability)
 }
 
 func (s *Selector) Begin(request SelectionRequest) (*RequestPlan, error) {
@@ -121,6 +147,8 @@ func (s *Selector) SwapSnapshot(next *Snapshot) error {
 		return err
 	}
 	s.circuits.Reconcile(previous, next)
+	s.health.Reconcile(previous, next)
+	s.metrics.Reconcile(next)
 	return nil
 }
 
@@ -136,6 +164,27 @@ func (s *Selector) ResetCircuit(routeID string) {
 		return
 	}
 	s.circuits.Reset(routeID)
+}
+
+func (s *Selector) TransportHealthStore() *TransportHealthStore {
+	if s == nil {
+		return nil
+	}
+	return s.health
+}
+
+func (s *Selector) TransportHealthStatus(upstreamID string) TransportHealthStatus {
+	if s == nil || s.health == nil {
+		return TransportHealthStatus{State: TransportHealthUnknown}
+	}
+	return s.health.Status(upstreamID)
+}
+
+func (s *Selector) Metrics() *RouterMetrics {
+	if s == nil {
+		return nil
+	}
+	return s.metrics
 }
 
 func (p *RequestPlan) SnapshotRevision() uint64 {
@@ -240,7 +289,9 @@ func (p *RequestPlan) candidates(now time.Time, skipped map[string]struct{}) []R
 			continue
 		}
 		upstream, ok := p.snapshot.upstreams[route.UpstreamID]
-		if !ok || !upstream.Enabled || !p.selector.circuits.CanAttempt(route.ID, now) {
+		if !ok || !upstream.Enabled ||
+			!p.selector.health.CanRoute(route.UpstreamID) ||
+			!p.selector.circuits.CanAttempt(route.ID, now) {
 			continue
 		}
 		if !prioritySet || route.Priority > highestPriority {

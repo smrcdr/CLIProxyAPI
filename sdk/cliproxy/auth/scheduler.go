@@ -53,6 +53,7 @@ type scheduledAuthMeta struct {
 	providerKey       string
 	priority          int
 	websocketEnabled  bool
+	allModels         bool
 	supportedModelSet map[string]struct{}
 }
 
@@ -544,6 +545,7 @@ func buildScheduledAuthMeta(auth *Auth) *scheduledAuthMeta {
 		providerKey:       providerKey,
 		priority:          authPriority(auth),
 		websocketEnabled:  authWebsocketsEnabled(auth),
+		allModels:         auth.Attributes != nil && strings.EqualFold(strings.TrimSpace(auth.Attributes["smartrouter_managed"]), "true"),
 		supportedModelSet: supportedModelSetForAuth(auth.ID),
 	}
 }
@@ -630,6 +632,9 @@ func (p *providerScheduler) ensureModelLocked(modelKey string, now time.Time) *m
 
 // supportsModel reports whether the auth metadata currently supports modelKey.
 func (m *scheduledAuthMeta) supportsModel(modelKey string) bool {
+	if m != nil && m.allModels {
+		return true
+	}
 	modelKey = canonicalModelKey(modelKey)
 	if modelKey == "" {
 		return true

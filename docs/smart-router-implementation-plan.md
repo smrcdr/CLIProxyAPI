@@ -3,7 +3,7 @@
 Status: Active
 Architecture source of truth: `docs/smart-router-v1.md`
 Implementation repository: `/home/sanya/coding/Earn/SmartAPI/SmartCLIProxy`
-Last baseline verification: 2026-07-25
+Last baseline verification: 2026-07-26
 
 ## 1. Purpose
 
@@ -51,8 +51,8 @@ Required final verification after Go changes:
 ```bash
 gofmt -w <changed-go-files>
 go test ./...
-go test -race ./internal/config ./internal/smartrouter ./sdk/cliproxy
-go vet ./internal/config ./internal/smartrouter ./sdk/cliproxy/...
+go test -race ./internal/config ./internal/smartrouter ./sdk/api/handlers ./sdk/cliproxy
+go vet ./internal/config ./internal/smartrouter ./sdk/api/handlers ./sdk/cliproxy/...
 go build -o /tmp/smartcli-router-build ./cmd/server
 git diff --check
 ```
@@ -75,6 +75,36 @@ Implemented files:
 - `internal/smartrouter/selector_test.go`
 - `internal/smartrouter/circuit.go`
 - `internal/smartrouter/circuit_test.go`
+- `internal/smartrouter/coordinator.go`
+- `internal/smartrouter/coordinator_test.go`
+- `internal/smartrouter/retry_after.go`
+- `internal/smartrouter/retry_after_test.go`
+- `internal/smartrouter/stream.go`
+- `internal/smartrouter/stream_coordinator.go`
+- `internal/smartrouter/stream_coordinator_test.go`
+- `internal/smartrouter/usage.go`
+- `internal/smartrouter/usage_test.go`
+- `internal/smartrouter/storage.go`
+- `internal/smartrouter/file_storage.go`
+- `internal/smartrouter/audit.go`
+- `internal/smartrouter/management.go`
+- `internal/smartrouter/probe.go`
+- `internal/smartrouter/storage_test.go`
+- `internal/smartrouter/management_test.go`
+- `internal/translator/openai/claude/responses_bridge.go`
+- `internal/translator/openai/claude/responses_bridge_test.go`
+- `internal/translator/openai/openai/responses/reverse_bridge.go`
+- `internal/translator/openai/openai/responses/reverse_bridge_test.go`
+- `sdk/api/handlers/smart_router_attempt.go`
+- `sdk/api/handlers/smart_router_attempt_test.go`
+- `sdk/api/handlers/smart_router_execution.go`
+- `sdk/api/handlers/smart_router_execution_test.go`
+- `sdk/cliproxy/router_upstream_runtime.go`
+- `sdk/cliproxy/router_upstream_runtime_test.go`
+- `sdk/cliproxy/router_management_runtime.go`
+- `sdk/cliproxy/router_management_lifecycle_test.go`
+- `sdk/cliproxy/router_probe.go`
+- `sdk/cliproxy/router_probe_test.go`
 - `sdk/cliproxy/router_snapshot_test.go`
 - `docs/smart-router-v1.md`
 
@@ -84,6 +114,15 @@ Modified integration files:
 - `config.example.yaml`
 - `internal/config/config.go`
 - `internal/config/parse.go`
+- `internal/api/server.go`
+- `internal/runtime/executor/claude_executor.go`
+- `internal/runtime/executor/openai_compat_executor.go`
+- `internal/translator/`
+- `sdk/api/handlers/handlers.go`
+- `sdk/api/handlers/model_execution.go`
+- `sdk/api/options.go`
+- `sdk/cliproxy/auth/conductor.go`
+- `sdk/cliproxy/auth/scheduler.go`
 - `sdk/cliproxy/builder.go`
 - `sdk/cliproxy/service.go`
 
@@ -101,17 +140,47 @@ Current verified behavior:
 - Only one concurrent half-open probe is admitted.
 - A changed route or upstream gets a fresh circuit on snapshot reload.
 - Existing request plans retain their original route configuration.
-- No public inference handler uses SmartRouter yet.
+- Streaming fails over only while the downstream response is uncommitted.
+- The first semantic event commits the downstream and prevents every later
+  route selection.
+- Router-role public text, streaming, compact, WebSocket, and count-token
+  requests use SmartRouter when an enabled public model group matches.
+- Combined and pool roles keep SmartRouter inactive.
+- Route attempts use ephemeral runtime auth resolved from secret references;
+  snapshots and public handlers never receive secret values.
+- Chat Completions, Responses, and Anthropic Messages convert in every
+  supported direction with explicit lossy-feature preflight.
+- Canonical usage preserves known zeroes and unknown fields without charging
+  failed attempts or estimating reasoning from output text.
+- Router metadata uses complete-document optimistic revisions and crash-safe
+  atomic file replacement.
+- Upstream secrets are write-only through management, encrypted with
+  AES-256-GCM, and represented in DTOs only by configured state and timestamp.
+- Management mutations validate and normalize one complete document, coordinate
+  secret changes, persistence, runtime activation, rollback, and masked audit.
+- Authenticated management endpoints expose schema-driven upstream/model CRUD,
+  runtime state, circuit reset, and non-inference HTTP health probes.
+- Router metadata survives restart and cannot be overwritten by an ordinary
+  YAML watcher reload.
 - No production or development deployment was performed for these phases.
 
-Known deferred guard:
+Phase 8 security, health, and observability:
 
-- Router role must reject local account credentials after all credential sources
-  are enumerated. This is assigned to Phase 8 rather than guessed during role
-  parsing.
-- Phase 3 owns the final endpoint-specific failure classifier. The generic
-  circuit category helper is not permission to retry outside the specification
-  matrices.
+- Router role rejects configured local account/API-key sources, enabled
+  credential plugins, preloaded runtime credentials, and credential JSON files.
+- Router role skips local credential loading, auth refresh, and watcher auth
+  updates; credential/OAuth management routes are hidden.
+- Internal affinity forwarding requires an explicitly trusted pool upstream.
+- Router network policy protects public/private targets, runtime DNS answers,
+  HTTP opt-in, and allowlisted cross-origin redirects.
+- Inference and management keys must differ in router role.
+- Background HTTP health polling keeps transport health separate from
+  auth/rate-limit circuits and requires configured recovery thresholds.
+- Bounded in-memory metrics expose requests, attempts, failovers, status
+  classes, circuit transitions, latency, TTFT, usage gaps, partial stream
+  failures, and ambiguous image failures.
+- Stable internal diagnostic headers contain request, route, upstream, and
+  attempt IDs only.
 
 ## 5. Dependency graph
 
@@ -153,12 +222,12 @@ after Phase 3 contracts are stable. Their integration tests remain sequential.
 | 1 | Done | None | Roles, validated config, immutable snapshots |
 | 2 | Done | 1 | Request plans, weighted selection, circuits |
 | 3 | Done | 2 | Non-stream route attempts and safe failover |
-| 4 | Next | 3 | Commit-aware streaming failover |
-| 5 | Pending | 3, 4 | Existing runtime bridge, conversion, usage |
-| 6 | Pending | 5 | Safe image generation routing |
-| 7 | Pending | 5 | Management API, revisions, encrypted secrets |
-| 8 | Pending | 6, 7 | Security, health, metrics, diagnostics |
-| 9 | Pending | 7, 8 | `admin.smartapi.shop` |
+| 4 | Done | 3 | Commit-aware streaming failover |
+| 5 | Done | 3, 4 | Existing runtime bridge, conversion, usage |
+| 6 | Done | 5 | Safe image generation routing |
+| 7 | Done | 5 | Management API, revisions, encrypted secrets |
+| 8 | Done | 6, 7 | Security, health, metrics, diagnostics |
+| 9 | Done | 7, 8 | `admin.smartapi.shop` |
 | 10 | Pending | 8, optionally 9 | Dev deployment and integration evidence |
 | 11 | Blocked on approval | 10 | Separately approved production migration |
 
@@ -352,7 +421,43 @@ under `sdk/api/handlers` and keep policy/classification in
 
 ## 10. Phase 4: Streaming coordinator
 
-Status: Pending
+Status: Done
+
+Delivered:
+
+- `StreamCoordinator` in `internal/smartrouter/stream_coordinator.go` executing
+  one `RequestPlan` route by route through the injected
+  `StreamAttemptExecutor` interface, reusing the Phase 3 `AttemptRequest` DTO.
+- `StreamAttempt` exposes the initial status and headers separately from a
+  `StreamChunk` channel, so a non-2xx or connect failure fails over before any
+  downstream byte is written.
+- `StreamSink` (`Commit`/`Send`/`Fail`) is the downstream boundary. `Commit` is
+  called at most once per request and always before the first `Send`; a request
+  that never commits never touches the sink and reports through the returned
+  `*ExecutionError` instead.
+- `StreamState` values (`not_started`, `headers_received`, `uncommitted`,
+  `committed`, `completed`, `failed_partial`) are reported in
+  `StreamExecutionResult` alongside the Phase 3 sanitized diagnostics.
+- Semantic-event detectors for Chat Completions, Responses, and Anthropic
+  Messages in `internal/smartrouter/stream.go`. SSE comments, keepalives,
+  blank lines, `event:`/`id:`/`retry:` fields, `[DONE]`, and Anthropic `ping`
+  are non-committing; an `error` payload or invalid JSON is a protocol failure.
+- `streamPrelude` accumulates uncommitted bytes and classifies complete SSE
+  events plus complete bare JSON values at chunk boundaries or EOF, so an event
+  split across chunks is never misread as malformed. It prunes completed
+  non-semantic events at each SSE boundary and treats an unbounded single event
+  (>1 MiB) as a protocol failure.
+- `ExecutionPolicyFor` now returns the text policy for both stream modes.
+  `Coordinator.Execute` rejects streaming requests with `ErrStreamModeMismatch`
+  and the status matrix lives once in `ExecutionPolicy.classifyStatus`.
+- Each attempt runs under its own cancellable context and cancels before
+  calling `Close`, so an abandoned upstream reader is always released and no
+  attempt can deadlock against an executor that drains its own goroutine.
+
+Handoff notes for Phase 5: no timers were introduced anywhere in the stream
+path; upstream completion is the closed chunk channel only. Build the runtime
+bridge as a `StreamAttemptExecutor` implementation and a `StreamSink` backed by
+the Gin response writer, keeping credentials out of `internal/smartrouter`.
 
 ### 10.1 Goal
 
@@ -411,7 +516,39 @@ Do not add a new upstream read timeout.
 
 ## 11. Phase 5: Runtime bridge, protocol conversion, and usage
 
-Status: Pending
+Status: Done
+
+Delivered:
+
+- `SmartRouterAttemptExecutor` bridges both coordinators to the existing
+  handler, auth-manager, executor, and translator pipeline with an explicit
+  recursion bypass.
+- Router upstreams register deterministic, in-memory runtime provider and auth
+  IDs. `UpstreamSecretResolver` is the only credential boundary; failed
+  prepare/reload leaves the prior snapshot, provider URL, and secret active.
+- OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages support the
+  full streaming and non-streaming conversion matrix. Request-aware preflight
+  rejects unsupported tools, rich tool results, stop controls, structured
+  output, and service-tier combinations before any upstream call.
+- Public models are restored in bodies and streams. Internal affinity,
+  fingerprint, and router diagnostic headers are stripped from downstream
+  responses and ordinary direct upstream requests.
+- Router-role handlers cover text inference, streaming, Responses compact and
+  WebSocket paths through their shared execution methods, plus Anthropic
+  `count_tokens` through the selected route's real count operation.
+- `CanonicalUsage` records input, output, cached, cache-read, cache-creation,
+  reasoning, and total tokens with pointer presence semantics. Failed attempts
+  never contribute, explicit zero remains known, and missing reasoning remains
+  unknown instead of being estimated from output text.
+- Runtime activation is role-isolated. Startup and reload publish an empty,
+  monotonic snapshot outside router role, and reload applies credential-backed
+  runtime state only after every preparation step succeeds.
+- The shared streaming handler now publishes an immutable header snapshot only
+  after bootstrap retries and first-chunk interception finish, eliminating a
+  race between response-header readers and the stream goroutine.
+- Responses WebSocket waits for both terminal channels before synthesizing an
+  incomplete-stream error, so an upstream `429` cannot race with data-channel
+  closure and be replaced by a false `408`.
 
 ### 11.1 Goal
 
@@ -520,7 +657,25 @@ Rules:
 
 ## 12. Phase 6: Image generation routing
 
-Status: Pending
+Status: Done
+
+Delivered:
+
+- Public `POST /v1/images/generations` routing for image-capable model groups,
+  including the real Gin handler and runtime-managed upstream credentials.
+- Initial rollout validation for non-streaming `n=1` requests and one valid
+  image output.
+- Model-only rewriting while preserving prompt, size, quality, output format,
+  response format, and other request parameters.
+- Image-specific failover limited to explicit `401`, `403`, and `429`.
+- Terminal `image_ambiguous_failure` handling for network errors, timeouts,
+  `5xx`, malformed `2xx`, oversized responses, and cancellation.
+- A 32 MiB upstream response limit at both executor and response-validation
+  boundaries.
+- Public header sanitization and safe error responses without upstream bodies.
+- Request-log exclusion for image generation plus removal of image response
+  body capture in the OpenAI-compatible executor, including its legacy stream
+  path.
 
 ### 12.1 Goal
 
@@ -559,7 +714,27 @@ introducing ambiguous duplicate generations.
 
 ## 13. Phase 7: Management, persistence, and secrets
 
-Status: Pending
+Status: Done
+
+Delivered:
+
+- Storage interfaces for revisioned router metadata, encrypted secrets, and
+  masked audit events.
+- Crash-safe `0600` file stores with atomic replace and monotonic revisions.
+- AES-256-GCM secret envelopes bound to their internal reference, with the
+  installation key supplied only by `SMART_ROUTER_MASTER_KEY`.
+- Startup restoration from persisted metadata and startup rejection when an
+  authenticated upstream has no master key or custom runtime resolver.
+- Authenticated schema, upstream, model-group, route, validation, state,
+  non-inference probe, and circuit-reset endpoints under
+  `/v0/management/router`.
+- Browser-safe `snake_case` DTOs; secret values and internal references are
+  never returned.
+- `If-Match` protection, normalized complete-document commits, live snapshot
+  activation, rollback alignment, concurrent-update protection, and masked
+  audit.
+- Lifecycle tests proving live activation, restart reconstruction, secret
+  encryption/redaction, and YAML watcher isolation.
 
 ### 13.1 Goal
 
@@ -644,7 +819,7 @@ or swap failure must not return a false success.
 
 ## 14. Phase 8: Security, health, and observability
 
-Status: Pending
+Status: Done
 
 ### 14.1 Goal
 
@@ -705,7 +880,22 @@ responses.
 
 ## 15. Phase 9: Separate admin application
 
-Status: Pending
+Status: Done
+
+Delivered:
+
+- Independent `apps/admin` Next.js runtime with its own Docker image and
+  server-only environment contract.
+- SmartAPI-backed admin session proxy, role enforcement, and double-submit
+  CSRF validation on every unsafe BFF operation.
+- Fixed Router BFF routes for schemas, upstreams, model groups, routes,
+  validation, health actions, metrics, probes, and circuit resets.
+- Codex pool management and read-only OpenCode Quota/Swaper adapters with
+  allowlisted DTOs.
+- File-backed safe snapshots with stale read-only fallback and file-backed
+  masked operator audit.
+- Schema-driven upstream form plus Upstreams, Models, Account pools, Traffic,
+  and Audit pages.
 
 ### 15.1 Goal
 
@@ -841,15 +1031,18 @@ Read, in order:
 2. docs/smart-router-v1.md
 3. docs/smart-router-implementation-plan.md
 
-Implement Phase 3 only: Non-stream execution coordinator.
+Implement Phase 10 only: Development integration.
 
-Preserve the dirty worktree. Do not reset, revert, commit, push, deploy, or
-touch production. Keep internal/smartrouter independent of Gin and concrete
-provider credentials. Use a fake AttemptExecutor in this phase. Do not wire
-public inference handlers yet.
+Preserve both dirty worktrees. Do not reset, revert, commit, push, deploy, or
+touch production without explicit approval. Read Phase 10 preconditions and
+request dev-deployment approval before changing a running service. Build one
+SmartCLIProxy revision, use fake heterogeneous upstreams first, retain the
+redacted evidence listed in section 16.3, then connect the existing dev pools
+and SmartAPIV2 provider. Keep account selection inside pools.
 
-Before finishing, run the verification commands from section 3 and update the
-phase status plus handoff entry in the implementation plan.
+Before finishing, run the verification commands from section 3 plus the
+SmartAPIV2 admin checks and update the phase status plus handoff entry in this
+implementation plan.
 ```
 
 ## 20. Existing handoff
@@ -864,4 +1057,143 @@ Known limitations: public handlers are not routed; no attempt executor,
 streaming coordinator, management store, or secret resolver yet
 Next phase entry point: Phase 3, starting with a fake protocol-neutral
 `AttemptExecutor`
+Deployment performed: no
+
+Phase: 4
+Status: Done
+Files changed: `internal/smartrouter/stream.go`,
+`internal/smartrouter/stream_coordinator.go`,
+`internal/smartrouter/stream_coordinator_test.go`,
+`internal/smartrouter/coordinator.go`,
+`internal/smartrouter/coordinator_test.go`,
+`docs/smart-router-implementation-plan.md`
+Interfaces added or changed: `StreamAttemptExecutor`, `StreamAttempt`,
+`StreamChunk`, `StreamSink`, `StreamCommit`, `StreamState`,
+`StreamCoordinator`, `StreamExecutionResult`, `ErrStreamModeMismatch`,
+`ErrStreamSinkNotConfigured`, `ErrStreamProtocolNotSupported`;
+`ExecutionPolicyFor` now serves stream mode and `Coordinator.Execute` rejects
+streaming requests
+Tests run: `go test ./internal/smartrouter`, `go test ./...`,
+`go test -race ./internal/config ./internal/smartrouter ./sdk/cliproxy`,
+`go vet ./internal/config ./internal/smartrouter ./sdk/cliproxy/...`,
+`go build ./cmd/server`, `git diff --check`
+Known limitations: the stream coordinator is wired to nothing yet; usage
+normalization, `usage_missing` diagnostics, and protocol translation belong to
+Phase 5. The semantic detectors read the entry protocol only, so a route whose
+upstream protocol differs relies on the Phase 5 translator to emit
+entry-protocol chunks.
+Next phase entry point: Phase 5, implementing `AttemptExecutor` and
+`StreamAttemptExecutor` in `sdk/api/handlers` over the existing runtime
+pipeline
+Deployment performed: no
+
+Phase: 5
+Status: Done
+Files changed: `internal/smartrouter/usage.go`,
+`internal/smartrouter/usage_test.go`, protocol bridge and translator contract
+tests under `internal/translator/`, `sdk/api/handlers/smart_router_attempt.go`,
+`sdk/api/handlers/smart_router_execution.go`,
+`sdk/cliproxy/router_upstream_runtime.go`, their tests, and the integration
+files listed in section 4
+Interfaces added or changed: `UpstreamSecretResolver`,
+`SmartRouterProtocolExecutor`, `ProtocolExecutionRequest` route bypass,
+`ExecuteProtocolCountWithAuthManager`, `CanonicalUsage`, runtime auth
+registration, selector model matching, and router-role API wiring
+Tests run: full translator and router package tests, handler/runtime integration
+tests, `go test ./...`, focused race tests, focused vet, server build, and
+`git diff --check`
+Known limitations: image routing, persistent encrypted secret storage,
+management APIs, health/observability, the separate admin application, and dev
+deployment remain in later phases
+Next phase entry point: Phase 6, adding strict non-streaming image routing with
+the no-ambiguous-retry policy while keeping billing in SmartAPIV2
+Deployment performed: no
+
+Phase: 6
+Status: Done
+Files changed: `internal/smartrouter/circuit.go`,
+`internal/smartrouter/coordinator.go`,
+`internal/smartrouter/coordinator_test.go`,
+`internal/smartrouter/selector.go`,
+`sdk/api/handlers/smart_router_attempt.go`,
+`sdk/api/handlers/smart_router_execution.go`,
+`sdk/api/handlers/openai/openai_images_handlers.go`,
+`internal/runtime/executor/openai_compat_executor.go`,
+`internal/api/middleware/request_logging.go`,
+`sdk/cliproxy/router_upstream_runtime_test.go`, and focused tests beside those
+packages
+Interfaces added or changed: `FailureImageAmbiguous`, image execution policy,
+selector capability matching, `ExecuteImageWithAuthManager`, SmartRouter image
+request/response validation, and public image-model handler recognition
+Tests run: focused retry, handler, middleware, executor, and runtime E2E tests;
+`go test ./...`; focused `go test -race`; focused `go vet`; `go build
+./cmd/server`; `git diff --check`
+Known limitations: persistent encrypted secret storage, revisioned management
+APIs, health/observability, the separate admin application, and dev deployment
+remain in later phases. Public size normalization, reservation/capture, and
+fixed image billing remain SmartAPIV2 responsibilities.
+Next phase entry point: Phase 7, defining metadata/secret/audit storage
+contracts before implementing the authenticated revisioned management API
+Deployment performed: no
+
+Phase: 7
+Status: Done
+Files changed: `internal/smartrouter/storage.go`,
+`internal/smartrouter/file_storage.go`, `internal/smartrouter/audit.go`,
+`internal/smartrouter/management.go`, `internal/smartrouter/probe.go`,
+`internal/api/handlers/management/router.go`, lifecycle integration in
+`internal/api`, `sdk/api`, and `sdk/cliproxy`, plus focused tests
+Interfaces added or changed: `RouterMetadataStore`, `RouterSecretStore`,
+`RouterAuditSink`, `RouterRuntimePreparer`, `RouterRuntimeUpdate`,
+`RouterManagementService`, `RouterProber`, API server options, and live
+management runtime preparation/commit
+Tests run: focused CRUD, storage, lifecycle, probe, middleware, and runtime
+tests; `go test ./...`; focused `go test -race`; focused `go vet`; server build;
+`git diff --check`
+Known limitations: periodic health polling, transport-health state, SSRF target
+policy, router-role local-credential rejection, metrics, the separate admin
+application, and dev deployment remain in later phases. Manual probes never
+fall back to inference and do not clear auth/rate-limit circuits.
+Next phase entry point: Phase 8, beginning with router-role credential-source
+isolation and an explicit network/header policy before health polling
+Deployment performed: no
+
+Phase: 8
+Status: Done
+Files changed: router network-policy config and management routes,
+`internal/smartrouter/health.go`, `internal/smartrouter/health_poller.go`,
+`internal/smartrouter/metrics.go`, selector/circuit diagnostics, shared HTTP
+clients, service lifecycle integration, and focused tests
+Interfaces added or changed: `RouterNetworkPolicy`, `TransportHealthStore`,
+`RouterHealthPoller`, `RouterMetrics`, safe network-policy/metrics management
+DTOs, route health/transition fields, and internal diagnostic headers
+Tests run: focused config, HTTP policy, health, metrics, management, handler,
+API, and lifecycle tests; full verification listed in the completion report
+Known limitations: metrics are process-local and reset on restart; a hostname
+explicitly listed in `allowed-private-hosts` is trusted for private DNS
+resolution; public SmartAPIV2 must strip router diagnostic headers
+Next phase entry point: Phase 9, the separate schema-driven admin application
+and BFF
+Deployment performed: no
+
+Phase: 9
+Status: Done
+Files changed: new `apps/admin` runtime and
+`docs/operations-admin.md` in
+`/home/sanya/coding/Earn/SmartAPI/SmartAPIV2`, workspace lockfile, and this
+implementation plan
+Interfaces added or changed: same-origin SmartAPI session proxy; fixed
+`/api/admin/router/*` and `/api/admin/pools/*` BFF routes; schema, upstream,
+model-group, route, traffic, Codex, OpenCode, snapshot, and audit DTOs
+Tests run: eight Node contract/security tests; admin TypeScript typecheck;
+Next.js production build; desktop/mobile browser checks; fixture secret scan;
+CSRF rejection; stale read-only fallback with mutation refusal
+Known limitations: BFF snapshots and audit use a single mounted filesystem and
+assume one writable admin replica; Router metrics reset with the Router
+process; direct management actions outside this BFF remain only in each
+service's native audit; the legacy SmartAPIV2 upstream-accounts page remains
+reachable until the separately approved Phase 10 dev cutover and must not gain
+new pool adapters
+Next phase entry point: Phase 10 dev integration, only after explicit approval
+for dev deployment
 Deployment performed: no

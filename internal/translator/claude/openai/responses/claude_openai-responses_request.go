@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+	"sync"
 
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -19,10 +20,23 @@ import (
 )
 
 var (
-	user    = ""
-	account = ""
-	session = ""
+	user         string
+	account      string
+	session      string
+	identityOnce sync.Once
 )
+
+func requestUserID() string {
+	identityOnce.Do(func() {
+		accountUUID, _ := uuid.NewRandom()
+		account = accountUUID.String()
+		sessionUUID, _ := uuid.NewRandom()
+		session = sessionUUID.String()
+		sum := sha256.Sum256([]byte(account + session))
+		user = hex.EncodeToString(sum[:])
+	})
+	return fmt.Sprintf("user_%s_account_%s_session_%s", user, account, session)
+}
 
 // ConvertOpenAIResponsesRequestToClaude transforms an OpenAI Responses API request
 // into a Claude Messages API request using only gjson/sjson for JSON handling.
@@ -37,19 +51,7 @@ var (
 func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte, stream bool) []byte {
 	rawJSON := inputRawJSON
 
-	if account == "" {
-		u, _ := uuid.NewRandom()
-		account = u.String()
-	}
-	if session == "" {
-		u, _ := uuid.NewRandom()
-		session = u.String()
-	}
-	if user == "" {
-		sum := sha256.Sum256([]byte(account + session))
-		user = hex.EncodeToString(sum[:])
-	}
-	userID := fmt.Sprintf("user_%s_account_%s_session_%s", user, account, session)
+	userID := requestUserID()
 
 	// Base Claude message payload
 	out := []byte(fmt.Sprintf(`{"model":"","max_tokens":32000,"messages":[],"metadata":{"user_id":"%s"}}`, userID))

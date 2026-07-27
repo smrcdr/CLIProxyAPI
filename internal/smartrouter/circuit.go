@@ -25,6 +25,9 @@ const (
 	FailureProtocol  FailureCategory = "protocol"
 	FailureClient    FailureCategory = "client"
 	FailureCancelled FailureCategory = "cancelled"
+	// FailureImageAmbiguous means an image request may have been accepted or
+	// completed upstream, so another route must not be attempted.
+	FailureImageAmbiguous FailureCategory = "image_ambiguous_failure"
 )
 
 type CircuitPolicy struct {
@@ -52,6 +55,7 @@ type CircuitStatus struct {
 	LastCategory  FailureCategory
 	LastFailureAt time.Time
 	LastSuccessAt time.Time
+	Transitions   uint64
 }
 
 type circuitEntry struct {
@@ -64,6 +68,7 @@ type circuitEntry struct {
 	lastCategory  FailureCategory
 	lastFailureAt time.Time
 	lastSuccessAt time.Time
+	transitions   uint64
 }
 
 type CircuitStore struct {
@@ -148,7 +153,7 @@ func (s *CircuitStore) TryAcquire(routeID string, now time.Time) (bool, bool) {
 	if entry.requiresReset || entry.openUntil.IsZero() || entry.openUntil.After(now) {
 		return false, false
 	}
-	entry.state = CircuitHalfOpen
+	transitionCircuit(entry, CircuitHalfOpen)
 	entry.probeInFlight = true
 	return true, true
 }
@@ -181,7 +186,7 @@ func (s *CircuitStore) Record(routeID string, halfOpenProbe bool, result Attempt
 		s.openForAuth(entry, now)
 	case FailureRateLimit:
 		s.openForRateLimit(entry, result.RetryAfter, now)
-	case FailureTransient, FailureProtocol:
+	case FailureTransient, FailureProtocol, FailureImageAmbiguous:
 		s.recordTransient(entry, halfOpenProbe, result.Category, now)
 	case FailureNone, FailureClient, FailureCancelled:
 		if halfOpenProbe {
@@ -268,6 +273,7 @@ func (s *CircuitStore) Status(routeID string, now time.Time) CircuitStatus {
 		LastCategory:  entry.lastCategory,
 		LastFailureAt: entry.lastFailureAt,
 		LastSuccessAt: entry.lastSuccessAt,
+		Transitions:   entry.transitions,
 	}
 }
 
@@ -322,7 +328,7 @@ func (s *CircuitStore) entry(routeID string) *circuitEntry {
 }
 
 func (s *CircuitStore) close(entry *circuitEntry, now time.Time) {
-	entry.state = CircuitClosed
+	transitionCircuit(entry, CircuitClosed)
 	entry.openUntil = time.Time{}
 	entry.requiresReset = false
 	entry.probeInFlight = false
@@ -333,7 +339,7 @@ func (s *CircuitStore) close(entry *circuitEntry, now time.Time) {
 }
 
 func (s *CircuitStore) openForAuth(entry *circuitEntry, now time.Time) {
-	entry.state = CircuitOpen
+	transitionCircuit(entry, CircuitOpen)
 	entry.openUntil = time.Time{}
 	entry.requiresReset = true
 	entry.probeInFlight = false
@@ -347,7 +353,7 @@ func (s *CircuitStore) openForRateLimit(entry *circuitEntry, retryAfter time.Dur
 	if retryAfter <= 0 {
 		retryAfter = s.policy.RateLimitCooldown
 	}
-	entry.state = CircuitOpen
+	transitionCircuit(entry, CircuitOpen)
 	entry.openUntil = now.Add(retryAfter)
 	entry.requiresReset = false
 	entry.probeInFlight = false
@@ -385,7 +391,7 @@ func (s *CircuitStore) openForTransient(entry *circuitEntry, now time.Time) {
 	if cooldown > s.policy.MaxCooldown {
 		cooldown = s.policy.MaxCooldown
 	}
-	entry.state = CircuitOpen
+	transitionCircuit(entry, CircuitOpen)
 	entry.openUntil = now.Add(cooldown)
 	entry.requiresReset = false
 	entry.probeInFlight = false
@@ -393,10 +399,18 @@ func (s *CircuitStore) openForTransient(entry *circuitEntry, now time.Time) {
 }
 
 func (s *CircuitStore) abandonProbe(entry *circuitEntry, now time.Time) {
-	entry.state = CircuitOpen
+	transitionCircuit(entry, CircuitOpen)
 	entry.openUntil = now.Add(s.policy.BaseCooldown)
 	entry.requiresReset = false
 	entry.probeInFlight = false
+}
+
+func transitionCircuit(entry *circuitEntry, next CircuitState) {
+	if entry == nil || entry.state == next {
+		return
+	}
+	entry.state = next
+	entry.transitions++
 }
 
 func (s *CircuitStore) pruneFailures(entry *circuitEntry, now time.Time) {

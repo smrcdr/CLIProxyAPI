@@ -156,13 +156,16 @@ func TestFinalizeStreamingWritesAPIWebsocketTimeline(t *testing.T) {
 
 type testRequestLogger struct {
 	enabled bool
+	calls   int
 }
 
 func (l *testRequestLogger) LogRequest(string, string, map[string][]string, []byte, int, map[string][]string, []byte, []byte, []byte, []byte, []byte, []*interfaces.ErrorMessage, string, time.Time, time.Time) error {
+	l.calls++
 	return nil
 }
 
 func (l *testRequestLogger) LogStreamingRequest(string, string, map[string][]string, []byte, string) (logging.StreamingLogWriter, error) {
+	l.calls++
 	return &testStreamingLogWriter{}, nil
 }
 

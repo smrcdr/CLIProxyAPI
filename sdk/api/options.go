@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	internalapi "github.com/router-for-me/CLIProxyAPI/v7/internal/api"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/smartrouter"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/logging"
@@ -33,6 +34,21 @@ func WithRouterConfigurator(fn func(*gin.Engine, *handlers.BaseAPIHandler, *conf
 // WithLocalManagementPassword stores a runtime-only management password accepted for localhost requests.
 func WithLocalManagementPassword(password string) ServerOption {
 	return internalapi.WithLocalManagementPassword(password)
+}
+
+// WithSmartRouterSelector connects router-role public handlers to Smart Router.
+func WithSmartRouterSelector(selector *smartrouter.Selector) ServerOption {
+	return internalapi.WithSmartRouterSelector(selector)
+}
+
+// WithRouterManagementService connects the authenticated router management API.
+func WithRouterManagementService(service *smartrouter.RouterManagementService) ServerOption {
+	return internalapi.WithRouterManagementService(service)
+}
+
+// WithRouterProber connects non-inference router health checks to management.
+func WithRouterProber(prober smartrouter.RouterProber) ServerOption {
+	return internalapi.WithRouterProber(prober)
 }
 
 // WithKeepAliveEndpoint enables a keep-alive endpoint with the provided timeout and callback.

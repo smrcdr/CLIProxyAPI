@@ -22,6 +22,7 @@ type modelExecutionOptions struct {
 	SkipRouterPluginID      string
 	ForcedProvider          string
 	AuthSelectionModel      string
+	BypassSmartRouter       bool
 }
 
 // ProtocolExecutionRequest describes a route-level model execution request with explicit protocols.
@@ -151,6 +152,31 @@ func (h *BaseAPIHandler) ExecuteProtocolWithAuthManager(ctx context.Context, req
 		Query:              req.Query,
 		ForcedProvider:     req.ForcedProvider,
 		AuthSelectionModel: req.AuthSelectionModel,
+		BypassSmartRouter:  true,
+	})
+	if errMsg != nil {
+		return ModelExecutionResponse{}, errMsg
+	}
+	return ModelExecutionResponse{
+		StatusCode: http.StatusOK,
+		Headers:    cloneHeader(headers),
+		Body:       cloneBytes(body),
+	}, nil
+}
+
+// ExecuteProtocolCountWithAuthManager executes a route-level token-count
+// request through the selected runtime provider without entering SmartRouter
+// recursively.
+func (h *BaseAPIHandler) ExecuteProtocolCountWithAuthManager(ctx context.Context, req ProtocolExecutionRequest) (ModelExecutionResponse, *interfaces.ErrorMessage) {
+	if req.Stream {
+		return ModelExecutionResponse{}, modelExecutionModeError("ExecuteProtocolCountWithAuthManager requires Stream=false")
+	}
+	body, headers, errMsg := h.executeCountWithAuthManager(ctx, req.EntryProtocol, req.Model, cloneBytes(req.Body), req.Alt, modelExecutionOptions{
+		Headers:            req.Headers,
+		Query:              req.Query,
+		ForcedProvider:     req.ForcedProvider,
+		AuthSelectionModel: req.AuthSelectionModel,
+		BypassSmartRouter:  true,
 	})
 	if errMsg != nil {
 		return ModelExecutionResponse{}, errMsg
@@ -172,6 +198,7 @@ func (h *BaseAPIHandler) ExecuteProtocolStreamWithAuthManager(ctx context.Contex
 		Query:              req.Query,
 		ForcedProvider:     req.ForcedProvider,
 		AuthSelectionModel: req.AuthSelectionModel,
+		BypassSmartRouter:  true,
 	})
 	chunks, errMsg := prepareModelExecutionStream(ctx, dataChan, errChan)
 	if errMsg != nil {

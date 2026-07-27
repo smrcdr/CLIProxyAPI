@@ -19,6 +19,7 @@ import (
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/smartrouter"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -421,6 +422,9 @@ type BaseAPIHandler struct {
 	// ModelRouterHost optionally routes matching requests to a plugin executor, the router's own
 	// executor, or a built-in provider before model-to-provider resolution and auth selection.
 	ModelRouterHost PluginModelRouterHost
+
+	// smartRouter owns public model-group routing for router-role services.
+	smartRouter *smartRouterExecution
 }
 
 // NewBaseAPIHandlers creates a new API handlers instance.
@@ -457,6 +461,21 @@ func (h *BaseAPIHandler) SetPluginHost(host PluginInterceptorHost) {
 		return
 	}
 	h.PluginHost = host
+}
+
+// SetSmartRouterSelector enables Smart Router for public models present in the
+// selector snapshot. A nil selector leaves existing handler behavior intact.
+func (h *BaseAPIHandler) SetSmartRouterSelector(selector *smartrouter.Selector) {
+	if h == nil || selector == nil {
+		return
+	}
+	h.smartRouter = newSmartRouterExecution(selector, h)
+}
+
+// HandlesSmartRouterImageModel reports whether the active router snapshot owns
+// the public model as an image model group.
+func (h *BaseAPIHandler) HandlesSmartRouterImageModel(publicModel string) bool {
+	return h != nil && h.smartRouter != nil && h.smartRouter.HandlesImageModel(publicModel)
 }
 
 // SetModelRouterHost configures the optional plugin model router host.
@@ -719,6 +738,12 @@ func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType
 }
 
 func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entryProtocol, exitProtocol, modelName string, rawJSON []byte, alt string, allowImageModel bool, execOptions modelExecutionOptions) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	if !execOptions.BypassSmartRouter && h.smartRouter != nil && h.smartRouter.HandlesModel(modelName) {
+		if allowImageModel {
+			return h.smartRouter.ExecuteImage(ctx, modelName, rawJSON)
+		}
+		return h.smartRouter.Execute(ctx, entryProtocol, modelName, rawJSON)
+	}
 	originalRequestedModel := modelName
 	routeDecision := h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, false, execOptions)
 	responseProtocol := modelExecutionResponseProtocol(entryProtocol, exitProtocol)
@@ -791,6 +816,9 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 }
 
 func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string, execOptions modelExecutionOptions) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	if !execOptions.BypassSmartRouter && h.smartRouter != nil && h.smartRouter.HandlesModel(modelName) {
+		return h.smartRouter.ExecuteCount(ctx, handlerType, modelName, rawJSON)
+	}
 	originalRequestedModel := modelName
 	routeDecision := h.applyModelRouter(ctx, handlerType, modelName, rawJSON, false, execOptions)
 	if routeDecision.ExecutorPluginID != "" {
@@ -1115,6 +1143,12 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 }
 
 func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context, entryProtocol, exitProtocol, modelName string, rawJSON []byte, alt string, allowImageModel bool, execOptions modelExecutionOptions) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
+	if !execOptions.BypassSmartRouter && h.smartRouter != nil && h.smartRouter.HandlesModel(modelName) {
+		if allowImageModel {
+			return smartRouterImmediateStreamError(smartRouterPublicError(smartrouter.ErrExecutionPolicyUnavailable))
+		}
+		return h.smartRouter.ExecuteStream(ctx, entryProtocol, modelName, rawJSON)
+	}
 	originalRequestedModel := modelName
 	routeDecision := h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, true, execOptions)
 	responseProtocol := modelExecutionResponseProtocol(entryProtocol, exitProtocol)
@@ -1199,6 +1233,13 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	chunks := streamResult.Chunks
 	dataChan := make(chan []byte)
 	errChan := make(chan *interfaces.ErrorMessage, 1)
+	headersReady := make(chan struct{})
+	var headersReadyOnce sync.Once
+	markHeadersReady := func() {
+		headersReadyOnce.Do(func() {
+			close(headersReady)
+		})
+	}
 	streamHeaderInitialized := false
 	streamHeadersCommitted := false
 
@@ -1268,6 +1309,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	go func() {
 		defer close(dataChan)
 		defer close(errChan)
+		defer markHeadersReady()
 		if streamCanceledBeforeRead {
 			return
 		}
@@ -1403,6 +1445,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 					}
 					sentPayload = true
 					streamHeadersCommitted = true
+					markHeadersReady()
 					if okSendData := sendData(payload); !okSendData {
 						return
 					}
@@ -1411,12 +1454,15 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 					}
 				}
 			}
-			applyStreamHeaderInit()
-			return
 		}
 	}()
+	// Do not expose a header map while the bootstrap goroutine can still
+	// replace it after a retry or first-chunk interceptor. The goroutine marks
+	// headers ready immediately before publishing the first payload, or when
+	// the stream terminates without one.
+	<-headersReady
 	dataChanOut, errChanOut := h.finalizeStream(ctx, responseProtocol, dataChan, errChan)
-	return dataChanOut, upstreamHeaders, errChanOut
+	return dataChanOut, cloneHeader(upstreamHeaders), errChanOut
 }
 
 func validateSSEDataJSON(chunk []byte) error {
