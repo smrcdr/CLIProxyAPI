@@ -69,6 +69,10 @@ type Handler struct {
 	codexDeviceSessions     map[string]*codexDeviceSession
 	codexFingerprintSecret  []byte
 	codexPollerOnce         sync.Once
+	accountProxyMu          sync.RWMutex
+	accountProxyLoadOnce    sync.Once
+	accountProxyLoadErr     error
+	accountProxies          map[string]accountProxy
 	routerManagement        *smartrouter.RouterManagementService
 	routerSelector          *smartrouter.Selector
 	routerProber            smartrouter.RouterProber
@@ -96,6 +100,7 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		codexRefreshLocks:   make(map[string]*sync.Mutex),
 		codexQuota:          make(map[string]codexQuotaSnapshot),
 		codexDeviceSessions: make(map[string]*codexDeviceSession),
+		accountProxies:      make(map[string]accountProxy),
 		codexFingerprintSecret: []byte(strings.TrimSpace(
 			os.Getenv("CODEX_ACCOUNT_FINGERPRINT_SECRET"),
 		)),

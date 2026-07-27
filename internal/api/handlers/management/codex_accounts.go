@@ -54,6 +54,9 @@ type codexAccountDTO struct {
 	Fingerprint      string              `json:"fingerprint"`
 	Email            string              `json:"email"`
 	Plan             string              `json:"plan,omitempty"`
+	ProxyID          string              `json:"proxy_id,omitempty"`
+	ProxyName        string              `json:"proxy_name,omitempty"`
+	ProxyMode        string              `json:"proxy_mode"`
 	Enabled          bool                `json:"enabled"`
 	Routable         bool                `json:"routable"`
 	CredentialStatus string              `json:"credential_status"`
@@ -76,6 +79,8 @@ type codexDeviceSession struct {
 	Status          string
 	Fingerprint     string
 	Error           string
+	ProxyID         string
+	ProxyURL        string
 }
 
 type codexDeviceSessionDTO struct {
@@ -88,6 +93,7 @@ type codexDeviceSessionDTO struct {
 	Status          string    `json:"status"`
 	Fingerprint     string    `json:"fingerprint,omitempty"`
 	Error           string    `json:"error,omitempty"`
+	ProxyID         string    `json:"proxy_id,omitempty"`
 }
 
 type importedCodexCredential struct {
@@ -338,7 +344,28 @@ func (h *Handler) CreateCodexDeviceSession(c *gin.Context) {
 		return
 	}
 	h.pruneCodexDeviceSessions()
-	authorization, err := sdkauth.StartCodexDeviceAuthorization(c.Request.Context(), h.cfg)
+	var request struct {
+		ProxyID string `json:"proxy_id"`
+	}
+	if c.Request.Body != nil && c.Request.ContentLength != 0 {
+		if err := c.ShouldBindJSON(&request); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid device session body"})
+			return
+		}
+	}
+	request.ProxyID = strings.TrimSpace(request.ProxyID)
+	proxyURL := "direct"
+	if request.ProxyID != "" {
+		proxy, exists := h.accountProxyByID(request.ProxyID)
+		if !exists {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "account proxy not found"})
+			return
+		}
+		proxyURL = accountProxyURL(proxy)
+	}
+	authorization, err := sdkauth.StartCodexDeviceAuthorizationWithProxyURL(
+		c.Request.Context(), h.cfg, proxyURL,
+	)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to start Codex device authorization"})
 		return
@@ -357,6 +384,8 @@ func (h *Handler) CreateCodexDeviceSession(c *gin.Context) {
 		CreatedAt:       time.Now().UTC(),
 		ExpiresAt:       authorization.ExpiresAt.UTC(),
 		Status:          "pending",
+		ProxyID:         request.ProxyID,
+		ProxyURL:        proxyURL,
 	}
 	h.codexAccountMu.Lock()
 	h.codexDeviceSessions[id] = session
@@ -380,8 +409,8 @@ func (h *Handler) GetCodexDeviceSession(c *gin.Context) {
 		c.JSON(http.StatusOK, codexDeviceSessionView(session))
 		return
 	}
-	auth, pending, err := sdkauth.PollCodexDeviceAuthorization(
-		c.Request.Context(), h.cfg, session.DeviceAuthID, session.UserCode,
+	auth, pending, err := sdkauth.PollCodexDeviceAuthorizationWithProxyURL(
+		c.Request.Context(), h.cfg, session.DeviceAuthID, session.UserCode, session.ProxyURL,
 	)
 	if err != nil {
 		session.Status = "failed"
@@ -393,6 +422,7 @@ func (h *Handler) GetCodexDeviceSession(c *gin.Context) {
 		c.JSON(http.StatusOK, codexDeviceSessionView(session))
 		return
 	}
+	setCodexAuthProxy(auth, session.ProxyID, session.ProxyURL)
 	applyCodexQuarantine(auth, "awaiting refresh and quota validation")
 	_, err = h.refreshAndMeasureCodexInMemory(c.Request.Context(), auth)
 	if err != nil {
@@ -539,10 +569,25 @@ func (h *Handler) codexAccountDTO(auth *coreauth.Auth) codexAccountDTO {
 		copyValue := quotaValue
 		quota = &copyValue
 	}
+	proxyID := codexMetadataString(auth.Metadata, accountProxyAssignmentKey)
+	proxyName := ""
+	proxyMode := "global"
+	if strings.EqualFold(strings.TrimSpace(auth.ProxyURL), "direct") {
+		proxyMode = "direct"
+	}
+	if proxyID != "" {
+		proxyMode = "proxy"
+		if proxy, ok := h.accountProxyByID(proxyID); ok {
+			proxyName = proxy.Name
+		}
+	}
 	return codexAccountDTO{
 		Fingerprint:      fingerprint,
 		Email:            codexMetadataString(auth.Metadata, "email"),
 		Plan:             authAttribute(auth, "plan_type"),
+		ProxyID:          proxyID,
+		ProxyName:        proxyName,
+		ProxyMode:        proxyMode,
 		Enabled:          !auth.Disabled,
 		Routable:         routable,
 		CredentialStatus: status,
@@ -607,6 +652,12 @@ func (h *Handler) authFromImportedCodex(record importedCodexCredential, existing
 		auth.Runtime = existing.Runtime
 		auth.Success = existing.Success
 		auth.Failed = existing.Failed
+		auth.ProxyURL = existing.ProxyURL
+		for _, key := range []string{"proxy_url", accountProxyAssignmentKey} {
+			if value, ok := existing.Metadata[key]; ok {
+				auth.Metadata[key] = value
+			}
+		}
 		auth.Metadata[codexManualDisabledKey] = existing.Disabled ||
 			codexMetadataBool(existing.Metadata, codexManualDisabledKey)
 	}
@@ -873,6 +924,7 @@ func codexDeviceSessionView(session *codexDeviceSession) codexDeviceSessionDTO {
 		Status:          session.Status,
 		Fingerprint:     session.Fingerprint,
 		Error:           session.Error,
+		ProxyID:         session.ProxyID,
 	}
 }
 

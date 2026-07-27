@@ -67,13 +67,19 @@ type CodexDeviceAuthorization struct {
 // StartCodexDeviceAuthorization starts a device authorization without blocking
 // while the user finishes the browser step.
 func StartCodexDeviceAuthorization(ctx context.Context, cfg *config.Config) (*CodexDeviceAuthorization, error) {
+	return StartCodexDeviceAuthorizationWithProxyURL(ctx, cfg, "")
+}
+
+// StartCodexDeviceAuthorizationWithProxyURL starts a device authorization
+// through an optional account-specific proxy.
+func StartCodexDeviceAuthorizationWithProxyURL(ctx context.Context, cfg *config.Config, proxyURL string) (*CodexDeviceAuthorization, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("codex device authorization requires config")
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	httpClient := util.SetProxy(&cfg.SDKConfig, &http.Client{})
+	httpClient := codexDeviceHTTPClient(cfg, proxyURL)
 	response, err := requestCodexDeviceUserCode(ctx, httpClient)
 	if err != nil {
 		return nil, err
@@ -98,13 +104,19 @@ func StartCodexDeviceAuthorization(ctx context.Context, cfg *config.Config) (*Co
 // PollCodexDeviceAuthorization performs one device-flow poll. A nil auth and
 // pending=true means the user has not completed authorization yet.
 func PollCodexDeviceAuthorization(ctx context.Context, cfg *config.Config, deviceAuthID, userCode string) (auth *coreauth.Auth, pending bool, err error) {
+	return PollCodexDeviceAuthorizationWithProxyURL(ctx, cfg, deviceAuthID, userCode, "")
+}
+
+// PollCodexDeviceAuthorizationWithProxyURL performs one device-flow poll
+// through the same account-specific proxy used to create the session.
+func PollCodexDeviceAuthorizationWithProxyURL(ctx context.Context, cfg *config.Config, deviceAuthID, userCode, proxyURL string) (auth *coreauth.Auth, pending bool, err error) {
 	if cfg == nil {
 		return nil, false, fmt.Errorf("codex device authorization requires config")
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	httpClient := util.SetProxy(&cfg.SDKConfig, &http.Client{})
+	httpClient := codexDeviceHTTPClient(cfg, proxyURL)
 	tokenResponse, pending, err := pollCodexDeviceTokenOnce(ctx, httpClient, deviceAuthID, userCode)
 	if err != nil || pending {
 		return nil, pending, err
@@ -115,7 +127,7 @@ func PollCodexDeviceAuthorization(ctx context.Context, cfg *config.Config, devic
 	if authCode == "" || codeVerifier == "" || codeChallenge == "" {
 		return nil, false, fmt.Errorf("codex device flow token response missing required fields")
 	}
-	authService := codex.NewCodexAuth(cfg)
+	authService := codex.NewCodexAuthWithProxyURL(cfg, proxyURL)
 	authBundle, err := authService.ExchangeCodeForTokensWithRedirect(
 		ctx,
 		authCode,
@@ -128,6 +140,14 @@ func PollCodexDeviceAuthorization(ctx context.Context, cfg *config.Config, devic
 	authenticator := NewCodexAuthenticator()
 	record, err := authenticator.buildAuthRecord(authService, authBundle)
 	return record, false, err
+}
+
+func codexDeviceHTTPClient(cfg *config.Config, proxyURL string) *http.Client {
+	sdkConfig := cfg.SDKConfig
+	if proxyURL = strings.TrimSpace(proxyURL); proxyURL != "" {
+		sdkConfig.ProxyURL = proxyURL
+	}
+	return util.SetProxy(&sdkConfig, &http.Client{})
 }
 
 func shouldUseCodexDeviceFlow(opts *LoginOptions) bool {
