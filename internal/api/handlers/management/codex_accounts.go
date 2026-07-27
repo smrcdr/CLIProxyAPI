@@ -177,15 +177,31 @@ func (h *Handler) ImportCodexAccounts(c *gin.Context) {
 		return
 	}
 	var records []importedCodexCredential
+	var requestedProxyID *string
 	if err := json.Unmarshal(body, &records); err != nil {
 		var wrapped struct {
 			Accounts []importedCodexCredential `json:"accounts"`
+			ProxyID  *string                   `json:"proxy_id"`
 		}
 		if wrappedErr := json.Unmarshal(body, &wrapped); wrappedErr != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "body must be an account array or {accounts: [...]}"})
 			return
 		}
 		records = wrapped.Accounts
+		requestedProxyID = wrapped.ProxyID
+	}
+	proxyID, proxyURL := "", ""
+	if requestedProxyID != nil {
+		proxyID = strings.TrimSpace(*requestedProxyID)
+		proxyURL = "direct"
+		if proxyID != "" {
+			proxy, exists := h.accountProxyByID(proxyID)
+			if !exists {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "account proxy not found"})
+				return
+			}
+			proxyURL = accountProxyURL(proxy)
+		}
 	}
 	result := codexImportResult{Items: make([]codexImportResultItem, 0, len(records))}
 	for index, record := range records {
@@ -209,6 +225,9 @@ func (h *Handler) ImportCodexAccounts(c *gin.Context) {
 		existing := h.findCodexAuthByFingerprint(item.Fingerprint)
 		created := existing == nil
 		auth := h.authFromImportedCodex(record, existing)
+		if requestedProxyID != nil {
+			setCodexAuthProxy(auth, proxyID, proxyURL)
+		}
 		applyCodexQuarantine(auth, "awaiting refresh and quota validation")
 		if _, err := h.refreshAndMeasureCodexInMemory(c.Request.Context(), auth); err != nil {
 			item.Status, item.Reason = "failed", "refresh or quota validation failed"
