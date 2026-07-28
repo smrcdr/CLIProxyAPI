@@ -21,6 +21,12 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestCodexResponsesWebsocketIdleTimeoutAllowsLongReasoning(t *testing.T) {
+	if codexResponsesWebsocketIdleTimeout < 15*time.Minute {
+		t.Fatalf("codex websocket idle timeout = %s, want at least 15m", codexResponsesWebsocketIdleTimeout)
+	}
+}
+
 func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T) {
 	body := []byte(`{"model":"gpt-5-codex","previous_response_id":"resp-1","input":[{"type":"message","id":"msg-1"}]}`)
 
