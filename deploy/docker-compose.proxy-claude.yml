@@ -15,7 +15,7 @@ services:
     ports:
       - "${HOST_BIND:-0.0.0.0}:${HOST_PORT:-20129}:8317"
     volumes:
-      - ${RUNTIME_DIR:-../runtime-claude}/config.yaml:/CLIProxyAPI/config.yaml:ro
+      - ${RUNTIME_DIR:-../runtime-claude}/config.yaml:/CLIProxyAPI/config.yaml:rw
       - ${RUNTIME_DIR:-../runtime-claude}/auths:/root/.cli-proxy-api
       - ${RUNTIME_DIR:-../runtime-claude}/logs:/CLIProxyAPI/logs
     networks:
