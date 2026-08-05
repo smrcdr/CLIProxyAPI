@@ -5,12 +5,12 @@ environment="dev"
 local_port=""
 
 usage() {
-  echo "Usage: smartapi-ui [dev|prod] [local-port]"
+  echo "Usage: smartapi-ui [dev|prod|proxy] [local-port]"
 }
 
 for argument in "$@"; do
   case "$argument" in
-    dev|prod)
+    dev|prod|proxy)
       environment="$argument"
       ;;
     --help|-h)
