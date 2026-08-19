@@ -253,6 +253,70 @@ func TestManager_MarkResult_PersistsCooldownOnlyWhenStateChanges(t *testing.T) {
 	}
 }
 
+func TestManager_MarkResult_CodexIncompleteStreamDoesNotCooldown(t *testing.T) {
+	store := &recordingCooldownStateStore{}
+	manager := NewManager(nil, nil, nil)
+	manager.SetCooldownStateStore(store)
+
+	auth := &Auth{ID: "auth-codex-stream", Provider: "codex", Status: StatusActive}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("Register() returned error: %v", errRegister)
+	}
+
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    "gpt-5.6-luna",
+		Success:  false,
+		Error: &Error{
+			Message:    codexIncompleteStreamErrorMessage,
+			HTTPStatus: 408,
+		},
+	})
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatal("updated auth was not found")
+	}
+	if updated.Unavailable || !updated.NextRetryAfter.IsZero() {
+		t.Fatalf("auth cooldown = unavailable %v next %v, want no cooldown", updated.Unavailable, updated.NextRetryAfter)
+	}
+	if state := updated.ModelStates["gpt-5.6-luna"]; state != nil {
+		t.Fatalf("model state = %+v, want no cooldown state", state)
+	}
+	if updated.Failed != 1 {
+		t.Fatalf("failed requests = %d, want 1", updated.Failed)
+	}
+	if got := store.saveCount.Load(); got != 0 {
+		t.Fatalf("cooldown state saved %d times, want 0", got)
+	}
+}
+
+func TestManager_MarkResult_OtherCodex408StillCooldowns(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "auth-codex-timeout", Provider: "codex", Status: StatusActive}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("Register() returned error: %v", errRegister)
+	}
+
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    "gpt-5.6-luna",
+		Success:  false,
+		Error:    &Error{Message: "upstream request timed out", HTTPStatus: 408},
+	})
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatal("updated auth was not found")
+	}
+	state := updated.ModelStates["gpt-5.6-luna"]
+	if state == nil || !state.Unavailable || state.NextRetryAfter.IsZero() {
+		t.Fatalf("model state = %+v, want transient cooldown", state)
+	}
+}
+
 func TestManager_RestoreCooldownStates(t *testing.T) {
 	nextRetry := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
 	store := &recordingCooldownStateStore{
@@ -300,5 +364,79 @@ func TestManager_RestoreCooldownStates(t *testing.T) {
 	}
 	if got := store.saveCount.Load(); got != 1 {
 		t.Fatalf("restore cleanup saved cooldown state %d times, want 1", got)
+	}
+}
+
+func TestManager_RestoreCooldownStates_IgnoresCodexIncompleteStream(t *testing.T) {
+	nextRetry := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	store := &recordingCooldownStateStore{
+		load: []CooldownStateRecord{
+			{
+				Provider:       "codex",
+				AuthID:         "auth-codex-stream",
+				Model:          "gpt-5.6-luna",
+				Status:         "cooling",
+				NextRetryAfter: nextRetry,
+				Reason:         codexIncompleteStreamErrorMessage,
+				LastError: &Error{
+					Message:    codexIncompleteStreamErrorMessage,
+					HTTPStatus: 408,
+				},
+				UpdatedAt: nextRetry.Add(-time.Minute),
+			},
+			{
+				Provider:       "codex",
+				AuthID:         "auth-codex-stream",
+				Model:          "gpt-5.6-sol",
+				Status:         "cooling",
+				NextRetryAfter: nextRetry,
+				Reason:         "quota",
+				Quota: QuotaState{
+					Exceeded:      true,
+					Reason:        "quota",
+					NextRecoverAt: nextRetry,
+				},
+				LastError: &Error{Message: "usage_limit_reached", HTTPStatus: 429},
+				UpdatedAt: nextRetry.Add(-time.Minute),
+			},
+		},
+	}
+	manager := NewManager(nil, nil, nil)
+	manager.SetCooldownStateStore(store)
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), &Auth{ID: "auth-codex-stream", Provider: "codex"}); errRegister != nil {
+		t.Fatalf("Register() returned error: %v", errRegister)
+	}
+
+	if errRestore := manager.RestoreCooldownStates(context.Background()); errRestore != nil {
+		t.Fatalf("RestoreCooldownStates() returned error: %v", errRestore)
+	}
+
+	auth, ok := manager.GetByID("auth-codex-stream")
+	if !ok {
+		t.Fatal("restored auth was not found")
+	}
+	if state := auth.ModelStates["gpt-5.6-luna"]; state != nil {
+		t.Fatalf("incomplete stream state = %+v, want it ignored", state)
+	}
+	quotaState := auth.ModelStates["gpt-5.6-sol"]
+	if quotaState == nil || !quotaState.Unavailable || !quotaState.Quota.Exceeded {
+		t.Fatalf("quota state = %+v, want quota cooldown preserved", quotaState)
+	}
+	if got := store.saveCount.Load(); got != 1 {
+		t.Fatalf("restore cleanup saved cooldown state %d times, want 1", got)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	quotaRecordFound := false
+	for _, record := range store.records {
+		if record.Model == "gpt-5.6-luna" || isCodexIncompleteStreamResultError(record.Provider, record.LastError) {
+			t.Fatalf("persisted records = %+v, want incomplete stream cooldown removed", store.records)
+		}
+		if record.Model == "gpt-5.6-sol" && record.Quota.Exceeded {
+			quotaRecordFound = true
+		}
+	}
+	if !quotaRecordFound {
+		t.Fatalf("persisted records = %+v, want quota cooldown preserved", store.records)
 	}
 }

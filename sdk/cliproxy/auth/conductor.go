@@ -157,6 +157,8 @@ func nextTransientErrorRetryAfter(now time.Time) time.Time {
 	return now.Add(time.Duration(seconds) * time.Second)
 }
 
+const codexIncompleteStreamErrorMessage = "stream error: stream disconnected before completion: stream closed before response.completed"
+
 // Result captures execution outcome used to adjust auth state.
 type Result struct {
 	// AuthID references the auth that produced this result.
@@ -654,6 +656,9 @@ func (m *Manager) RestoreCooldownStates(ctx context.Context) error {
 }
 
 func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now time.Time) bool {
+	if isCodexIncompleteStreamResultError(record.Provider, record.LastError) {
+		return false
+	}
 	authID := strings.TrimSpace(record.AuthID)
 	if authID == "" || record.NextRetryAfter.IsZero() || !record.NextRetryAfter.After(now) {
 		return false
@@ -3845,6 +3850,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
 		now := time.Now()
+		resultProvider := strings.TrimSpace(result.Provider)
+		if resultProvider == "" {
+			resultProvider = strings.TrimSpace(auth.Provider)
+		}
+		nonCoolingFailure := isCodexIncompleteStreamResultError(resultProvider, result.Error)
 		var cooldownRecordsBefore []CooldownStateRecord
 		trackCooldownState := m.cooldownStore != nil
 		if trackCooldownState {
@@ -3875,7 +3885,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		} else {
 			if result.Model != "" {
-				if !isRequestScopedNotFoundResultError(result.Error) {
+				if !isRequestScopedNotFoundResultError(result.Error) && !nonCoolingFailure {
 					disableCooling := m.cooldownDisabledForAuth(auth)
 					state := ensureModelState(auth, result.Model)
 					state.Unavailable = true
@@ -3981,7 +3991,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					auth.UpdatedAt = now
 					updateAggregatedAvailability(auth, now)
 				}
-			} else {
+			} else if !nonCoolingFailure {
 				disableCooling := m.cooldownDisabledForAuth(auth)
 				applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling)
 			}
@@ -4395,6 +4405,19 @@ func isRequestScopedNotFoundResultError(err *Error) bool {
 		return false
 	}
 	return isRequestScopedNotFoundMessage(err.Message)
+}
+
+// isCodexIncompleteStreamResultError identifies a request-scoped transport
+// failure. The upstream stream ended without a terminal event, but that does
+// not indicate that the selected credential or model is unavailable.
+func isCodexIncompleteStreamResultError(provider string, err *Error) bool {
+	if !strings.EqualFold(strings.TrimSpace(provider), "codex") || err == nil {
+		return false
+	}
+	if statusCodeFromResult(err) != http.StatusRequestTimeout {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(err.Message), codexIncompleteStreamErrorMessage)
 }
 
 // isRequestInvalidError returns true if the error represents a client request
