@@ -26,6 +26,12 @@ NATIVE_MODELS = (
     "minimax-m3",
 )
 
+# GPT model IDs are provided by the Codex OAuth registry.  They must not be
+# claimed by the legacy OpenCode compatibility provider: doing so makes the
+# provider-specific alias win during model resolution and silently sends GPT
+# traffic to OpenCode instead of Codex.
+CODEX_MODEL_ALIAS_PREFIX = "gpt-"
+
 CODEX_FINGERPRINT_ENV = "CODEX_ACCOUNT_FINGERPRINT_SECRET"
 
 
@@ -185,6 +191,8 @@ def build_models(model_map: dict[str, str]) -> list[dict[str, Any]]:
     for alias, upstream in model_map.items():
         if not isinstance(alias, str) or not alias or not isinstance(upstream, str) or not upstream:
             raise ValueError("modelMap contains an invalid alias mapping")
+        if alias.casefold().startswith(CODEX_MODEL_ALIAS_PREFIX):
+            continue
         models.append({"name": upstream, "alias": alias, "force-mapping": True})
     return models
 

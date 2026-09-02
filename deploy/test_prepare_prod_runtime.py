@@ -13,7 +13,7 @@ SPEC.loader.exec_module(prepare)
 
 
 class PrepareRuntimeTest(unittest.TestCase):
-    def test_build_config_uses_openai_chat_for_aliases(self) -> None:
+    def test_build_config_keeps_gpt_aliases_out_of_opencode(self) -> None:
         model_map = {
             "gpt-5.5": "qwen3.7-plus",
             "opus-4.8": "qwen3.7-plus",
@@ -43,7 +43,7 @@ class PrepareRuntimeTest(unittest.TestCase):
             ["upstream-one", "upstream-two"],
         )
         aliases = {model["alias"]: model["name"] for model in providers[0]["models"]}
-        self.assertEqual(aliases["gpt-5.5"], "qwen3.7-plus")
+        self.assertNotIn("gpt-5.5", aliases)
         self.assertEqual(aliases["opus-4.8"], "qwen3.7-plus")
         self.assertEqual(
             config["payload"]["override"][0],
@@ -222,9 +222,24 @@ debug: false
             model["alias"]: model["name"]
             for model in migrated["openai-compatibility"][0]["models"]
         }
-        self.assertEqual(aliases["gpt-5.5"], "qwen3.7-plus")
+        self.assertNotIn("gpt-5.5", aliases)
         self.assertEqual(aliases["opus-4.8"], "qwen3.7-plus")
         self.assertEqual(migrated["model-instructions"], instructions)
+
+    def test_build_models_filters_gpt_prefix_case_insensitively(self) -> None:
+        models = prepare.build_models(
+            {
+                "gpt-5.4": "qwen3.7-plus",
+                "GPT-5.5": "qwen3.7-plus",
+                "gpt-image-2": "qwen3.7-plus",
+                "opus-4.8": "qwen3.7-plus",
+            }
+        )
+        aliases = {model["alias"] for model in models}
+        self.assertNotIn("gpt-5.4", aliases)
+        self.assertNotIn("GPT-5.5", aliases)
+        self.assertNotIn("gpt-image-2", aliases)
+        self.assertIn("opus-4.8", aliases)
 
 
 if __name__ == "__main__":
