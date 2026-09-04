@@ -268,6 +268,8 @@ type Server struct {
 	// smartRouterSelector owns the live router model catalog and routing snapshot.
 	smartRouterSelector *smartrouter.Selector
 
+	// routerManagement owns the authenticated router management service.
+	routerManagement *smartrouter.RouterManagementService
 	// managementRoutesRegistered tracks whether the management routes have been attached to the engine.
 	managementRoutesRegistered atomic.Bool
 	// managementRoutesEnabled controls whether management endpoints serve real handlers.
@@ -363,6 +365,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		wsRoutes:            make(map[string]struct{}),
 		pluginHost:          optionState.pluginHost,
 		smartRouterSelector: optionState.smartRouterSelector,
+		routerManagement:    optionState.routerManagement,
 
 		exampleAPIKeySafeModeEnabled: optionState.exampleAPIKeySafeMode,
 	}
@@ -549,6 +552,7 @@ func (s *Server) setupRoutes() {
 
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
 	s.engine.GET("/smart-management.html", s.serveSmartManagementPage)
+	s.engine.GET("/router-management.html", s.serveRouterManagementPage)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
 	claudeCodeHandlers := claude.NewClaudeCodeAPIHandler(s.handlers)

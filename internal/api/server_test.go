@@ -204,6 +204,70 @@ func TestRouterRoleHidesLocalCredentialManagementAndOAuthRoutes(t *testing.T) {
 	}
 }
 
+func TestRouterManagementPageAvailableOnlyForRouterRuntime(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	directory := t.TempDir()
+	metadata, err := smartrouter.NewFileRouterMetadataStore(filepath.Join(directory, "metadata.json"))
+	if err != nil {
+		t.Fatalf("NewFileRouterMetadataStore() error = %v", err)
+	}
+	service, err := smartrouter.NewRouterManagementService(metadata, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("NewRouterManagementService() error = %v", err)
+	}
+
+	cfg := &proxyconfig.Config{
+		ServiceRole: proxyconfig.ServiceRoleRouter,
+		AuthDir:     filepath.Join(directory, "auth"),
+	}
+	server := NewServer(cfg, auth.NewManager(nil, nil, nil), sdkaccess.NewManager(), filepath.Join(directory, "config.yaml"), WithRouterManagementService(service))
+
+	req := httptest.NewRequest(http.MethodGet, "/router-management.html", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("router page status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if got := rr.Header().Get("Content-Type"); got != "text/html; charset=utf-8" {
+		t.Fatalf("content type = %q", got)
+	}
+	if got := rr.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("cache control = %q", got)
+	}
+	if !strings.Contains(rr.Body.String(), "SmartRouter") {
+		t.Fatalf("router page does not contain its title")
+	}
+
+	for _, role := range []proxyconfig.ServiceRole{proxyconfig.ServiceRoleCombined, proxyconfig.ServiceRolePool} {
+		roleCfg := *cfg
+		roleCfg.ServiceRole = role
+		roleServer := NewServer(&roleCfg, auth.NewManager(nil, nil, nil), sdkaccess.NewManager(), filepath.Join(directory, string(role)+".yaml"), WithRouterManagementService(service))
+		roleReq := httptest.NewRequest(http.MethodGet, "/router-management.html", nil)
+		roleRR := httptest.NewRecorder()
+		roleServer.engine.ServeHTTP(roleRR, roleReq)
+		if roleRR.Code != http.StatusNotFound {
+			t.Fatalf("role %q status = %d, want %d", role, roleRR.Code, http.StatusNotFound)
+		}
+	}
+}
+
+func TestRouterManagementPageRequiresRouterManagementService(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	directory := t.TempDir()
+	cfg := &proxyconfig.Config{
+		ServiceRole: proxyconfig.ServiceRoleRouter,
+		AuthDir:     filepath.Join(directory, "auth"),
+	}
+	server := NewServer(cfg, auth.NewManager(nil, nil, nil), sdkaccess.NewManager(), filepath.Join(directory, "config.yaml"))
+	req := httptest.NewRequest(http.MethodGet, "/router-management.html", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotFound)
+	}
+}
+
 func TestRouterRoleModelsListUsesModelGroups(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	directory := t.TempDir()
