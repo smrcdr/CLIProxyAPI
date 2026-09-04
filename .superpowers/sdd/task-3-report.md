@@ -39,3 +39,16 @@
 - Secret values remain write-only in the form and are sent only when newly entered; the management key remains sessionStorage-backed and 401 handling removes it.
 - Existing mutation gating and revision/conflict behavior remains centralized in `api` and `handleApiError`; only action error dispatch was consolidated.
 - No browser smoke check was rerun because the requested verification scope was limited to the two targeted Go tests and embedded-JS syntax check.
+ 
+## Task 3 Final Fixes
+- Confirmed `POST /upstreams/:id/test` in `internal/api/handlers/management/router.go` and changed `testUpstream` to send `method:"POST"` while retaining `mutation:true` revision/gate behavior.
+- Recovering 409 loads now always retain `stale=true` and the conflict gate, refresh successful server data through the settled loader, and avoid rendering over an active form. A later ordinary Refresh/load clears stale and conflict only after a complete successful load.
+
+## Final Verification
+- `go test ./internal/api -run 'TestRouterManagementPage' -count=1` — PASS (`ok github.com/router-for-me/CLIProxyAPI/v7/internal/api 0.009s`).
+- `go test ./internal/api/handlers/management -run 'TestRouterManagement' -count=1` — PASS (`ok github.com/router-for-me/CLIProxyAPI/v7/internal/api/handlers/management 0.010s`).
+- Embedded JavaScript `new Function` syntax check — PASS (`embedded JavaScript parsed successfully`).
+
+## Final Self-review
+- Production changes are limited to the requested embedded asset; the handler route was read-only verification and no backend code changed.
+- Recovery refresh preserves active forms because it updates data and metadata without calling `render`; normal full loads retain their loading/error handling and clear conflict only on success.
