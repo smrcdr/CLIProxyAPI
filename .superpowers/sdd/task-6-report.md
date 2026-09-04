@@ -62,4 +62,22 @@ Browser tooling was available. Opened `http://127.0.0.1:18317/router-management.
 ### Responsive fix self-review
 
 - Root cause is addressed at the grid track sizing boundary rather than hiding page overflow; no table min-width or existing navigation/auth/state behavior was changed.
+ 
+## Final-review fixes
+
+- Upstream create/edit 409 handling now awaits the existing `handleApiError` recovery and then calls `renderConflict` with the live submitted form and recovered (or ETag) revision. The active form remains mounted, its draft and write-only secret remain untouched, and the existing reload/reconcile gate disables saving until recovery is acknowledged.
+- Polling state/metrics refresh now detects revision drift or stale polling failures before rendering. If an editor form is mounted, it marks the app stale/conflicted and updates that form's existing conflict notice in place; it returns without calling destructive `render()`. With no active editor, stale status continues through the ordinary render path.
+- Removed only `mutation:true` from upstream test, route probe, circuit reset, and model-group validation requests. They remain POST requests, retain safe error handling, and are usable while configuration is stale. Configuration CRUD and network-policy PATCH retain revision gating and `If-Match`.
+- Login/session bootstrap now waits for `loadAll()` and requires `result.success === true` before hiding the login view, starting polling, or showing Connected. Partial loads and 401 recovery clear the key and leave the login form visible with an error.
+- `metricMax` now receives the matching observation count and returns an em dash when that count is zero, avoiding misleading `0 ms` values.
+
+### Focused verification and self-review
+
+- `go test ./internal/api -run 'TestRouterManagementPage' -count=1` — PASS.
+- `go test ./internal/api/handlers/management -run 'TestRouterManagement' -count=1` — PASS.
+- Embedded JavaScript extraction followed by Node syntax validation (`new Function`) — PASS.
+- Reviewed all `mutation:true` call sites: only configuration CRUD and network-policy PATCH remain gated; the four runtime/test/validation POSTs no longer carry the flag.
+- Reviewed draft-preservation paths: polling conflict activation and upstream 409 recovery operate on the existing form node and never call `render()` while an editor is open.
+ 
+ - Included upstream editors in the existing conflict short-circuit so later refresh/theme/navigation renders cannot replace a conflicted upstream draft.
 - Only the requested HTML asset and this report were modified. No formatter, linter, or project-wide suite was run.
