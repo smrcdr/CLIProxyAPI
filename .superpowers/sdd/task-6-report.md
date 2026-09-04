@@ -81,3 +81,18 @@ Browser tooling was available. Opened `http://127.0.0.1:18317/router-management.
  
  - Included upstream editors in the existing conflict short-circuit so later refresh/theme/navigation renders cannot replace a conflicted upstream draft.
 - Only the requested HTML asset and this report were modified. No formatter, linter, or project-wide suite was run.
+
+## Missing-helper regression and restoration
+
+- Regression confirmed at `6d51a42e`: `routeStatus`/`transportStatus` referenced `statusBadge`; `renderMetricsResults` referenced `metricMatches`, `metricAverage`, and `metricMax`; the upstream click delegation referenced `openUpstreamForm`; and the model-group click delegation referenced `deleteModelGroup`, but five of those definitions were absent.
+- Compared `6d51a42e` with the preceding working `6f03118c` and confirmed the five definitions were present there. Restored the exact `6f03118c` implementations, in their original dependency order, without changing the current final-review edits (including `metricMax`, conflict handling, polling, login gating, and responsive CSS).
+- A Node identifier-reference script checked that each restored helper has a declaration and at least one call site: `statusBadge` (3 references), `metricMatches` (3), `metricAverage` (3), `openUpstreamForm` (2), and `deleteModelGroup` (2). A comparison script confirmed each restored definition matches `6f03118c` exactly.
+- `go test ./internal/api -run 'TestRouterManagementPage' -count=1` — PASS (`ok github.com/router-for-me/CLIProxyAPI/v7/internal/api 0.009s`).
+- `go test ./internal/api/handlers/management -run 'TestRouterManagement' -count=1` — PASS (`ok github.com/router-for-me/CLIProxyAPI/v7/internal/api/handlers/management 0.010s`).
+- Extracted the sole embedded script to `/tmp/router-management-restored.js`; `node --check /tmp/router-management-restored.js` — PASS.
+
+### Browser smoke and self-review
+
+- Built the local router binary and started it with the temporary router-development configuration on `127.0.0.1:18317`. Logged in at `/router-management.html` using the local management key; the app reached `Revision 1` with no login error or page errors.
+- Visited all six hash views (`#overview`, `#upstreams`, `#model-groups`, `#route-state`, `#metrics`, and `#network-policy`). Each rendered its expected title, retained the requested hash, and activated exactly its matching navigation link. This exercised initialization and the restored route badge, metrics, and page-delegation paths without a `ReferenceError`.
+- The change is limited to the five missing helper definitions in the embedded asset plus this report. No backend, routing, deployment, formatter, linter, or project-wide suite changes were made. The pre-existing untracked `deploy/__pycache__/` remains untouched.
