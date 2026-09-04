@@ -27,6 +27,7 @@
   <script>
     const API_ROOT = "/v0/management/router";
     const SESSION_KEY = "smart-router-management-key";
+    const NAV_ITEMS = [["overview","Overview"],["upstreams","Upstreams"],["model-groups","Model groups"],["route-state","Route state"],["metrics","Metrics"],["network-policy","Network policy"]];
     const app = { key:sessionStorage.getItem(SESSION_KEY)||"", revision:null, theme:sessionStorage.getItem("smart-router-theme")||"light", activeView:"overview", stale:true, conflict:false, conflictRecoveryReady:false, loading:false, upstreams:[], modelGroups:[], routeStates:[], metrics:null, metricsFilters:{model:"",endpoint:"",route:"",upstream:"",result:""}, networkPolicy:null, networkPolicyFormOpen:false, schemas:{}, loadErrors:{}, upstreamFormId:null, upstreamFormOpen:false, modelGroupFormId:null, modelGroupFormOpen:false, routeFormGroupId:null, routeFormId:null, routeFormOpen:false, conflictForm:null, conflictRevision:null, validationResults:{} };
     let pollTimer = null;
     const $ = id => document.getElementById(id);
