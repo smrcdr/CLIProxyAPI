@@ -5,13 +5,20 @@ package cliproxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	configaccess "github.com/router-for-me/CLIProxyAPI/v7/internal/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/smartrouter"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
@@ -55,6 +62,9 @@ type Builder struct {
 
 	// postAuthHook is called after auth record creation and before persistence.
 	postAuthHook coreauth.PostAuthHook
+
+	// upstreamSecretResolver resolves Smart Router secret references at runtime.
+	upstreamSecretResolver UpstreamSecretResolver
 
 	// serverOptions contains additional server configuration options.
 	serverOptions []api.ServerOption
@@ -179,6 +189,13 @@ func (b *Builder) WithPostAuthHook(hook coreauth.PostAuthHook) *Builder {
 	return b
 }
 
+// WithUpstreamSecretResolver supplies runtime-only Smart Router credentials.
+// The resolver is never exposed to HTTP handlers or persisted by the service.
+func (b *Builder) WithUpstreamSecretResolver(resolver UpstreamSecretResolver) *Builder {
+	b.upstreamSecretResolver = resolver
+	return b
+}
+
 // Build validates inputs, applies defaults, and returns a ready-to-run service.
 func (b *Builder) Build() (*Service, error) {
 	if b.cfg == nil {
@@ -186,6 +203,42 @@ func (b *Builder) Build() (*Service, error) {
 	}
 	if b.configPath == "" {
 		return nil, fmt.Errorf("cliproxy: configuration path is required")
+	}
+	routerRevision := uint64(1)
+	var routerMetadataStore smartrouter.RouterMetadataStore
+	var routerSecretStore smartrouter.RouterSecretStore
+	var routerAuditSink smartrouter.RouterAuditSink
+	if b.cfg.ServiceRole == internalconfig.ServiceRoleRouter {
+		if errIsolation := b.cfg.ValidateRouterCredentialIsolation(); errIsolation != nil {
+			return nil, fmt.Errorf("cliproxy: %w", errIsolation)
+		}
+		var errRouterStorage error
+		b.cfg, routerRevision, routerMetadataStore, routerSecretStore, routerAuditSink, errRouterStorage = b.prepareRouterStorage()
+		if errRouterStorage != nil {
+			return nil, fmt.Errorf("cliproxy: %w", errRouterStorage)
+		}
+		if b.upstreamSecretResolver == nil && routerSecretStore != nil {
+			b.upstreamSecretResolver = routerSecretStore
+		}
+		if routerConfigUsesSecrets(b.cfg.Router) && b.upstreamSecretResolver == nil {
+			return nil, errors.New("cliproxy: SMART_ROUTER_MASTER_KEY or a custom upstream secret resolver is required")
+		}
+	}
+	if err := b.cfg.NormalizeAndValidateRouter(); err != nil {
+		return nil, fmt.Errorf("cliproxy: %w", err)
+	}
+	if b.cfg.ServiceRole == internalconfig.ServiceRoleRouter {
+		routerStorageDirectory := filepath.Join(filepath.Dir(b.configPath), "router")
+		if errIsolation := rejectRouterAuthDirectoryCredentials(b.cfg.AuthDir, routerStorageDirectory); errIsolation != nil {
+			return nil, fmt.Errorf("cliproxy: %w", errIsolation)
+		}
+	}
+	routerSnapshot, errRouterSnapshot := smartrouter.CompileSnapshot(b.cfg, routerRevision)
+	if errRouterSnapshot != nil {
+		return nil, fmt.Errorf("cliproxy: %w", errRouterSnapshot)
+	}
+	if b.cfg.ServiceRole != internalconfig.ServiceRoleRouter {
+		routerSnapshot = smartrouter.EmptySnapshotAtRevision(1)
 	}
 
 	tokenProvider := b.tokenProvider
@@ -259,8 +312,20 @@ func (b *Builder) Build() (*Service, error) {
 				TTL:      sessionAffinityTTL,
 			})
 		}
+		if b.cfg != nil && b.cfg.Routing.SmartAPIAffinity {
+			ttl := 30 * 24 * time.Hour
+			if ttlStr := strings.TrimSpace(b.cfg.Routing.SmartAPIAffinityTTL); ttlStr != "" {
+				if parsed, errParse := time.ParseDuration(ttlStr); errParse == nil && parsed > 0 {
+					ttl = parsed
+				}
+			}
+			selector = coreauth.NewSmartAPIAffinitySelector(selector, filepath.Join(b.cfg.AuthDir, "smartapi-affinity.json"), ttl)
+		}
 
 		coreManager = coreauth.NewManager(tokenStore, selector, nil)
+	}
+	if b.cfg.ServiceRole == internalconfig.ServiceRoleRouter && len(coreManager.List()) > 0 {
+		return nil, errors.New("cliproxy: router role cannot start with preloaded local credentials")
 	}
 	// Attach a default RoundTripper provider so providers can opt-in per-auth transports.
 	coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())
@@ -270,30 +335,149 @@ func (b *Builder) Build() (*Service, error) {
 		coreManager.SetPluginScheduler(pluginHost)
 	}
 
+	routerSnapshots := smartrouter.NewSnapshotStore(routerSnapshot)
 	service := &Service{
-		cfg:            b.cfg,
-		configPath:     b.configPath,
-		tokenProvider:  tokenProvider,
-		apiKeyProvider: apiKeyProvider,
-		watcherFactory: watcherFactory,
-		hooks:          b.hooks,
-		authManager:    authManager,
-		accessManager:  accessManager,
-		coreManager:    coreManager,
-		pluginHost:     pluginHost,
-		serverOptions:  append([]api.ServerOption(nil), b.serverOptions...),
+		cfg:             b.cfg,
+		configPath:      b.configPath,
+		tokenProvider:   tokenProvider,
+		apiKeyProvider:  apiKeyProvider,
+		watcherFactory:  watcherFactory,
+		hooks:           b.hooks,
+		authManager:     authManager,
+		accessManager:   accessManager,
+		coreManager:     coreManager,
+		pluginHost:      pluginHost,
+		routerSnapshots: routerSnapshots,
+		routerSelector:  smartrouter.NewSelector(routerSnapshots, nil),
+		routerUpstreamRuntime: newRouterUpstreamRuntime(
+			coreManager,
+			b.upstreamSecretResolver,
+		),
+		routerMetadataStore: routerMetadataStore,
+		routerSecretStore:   routerSecretStore,
+		routerAuditSink:     routerAuditSink,
+		serverOptions:       append([]api.ServerOption(nil), b.serverOptions...),
 	}
+	if routerMetadataStore != nil {
+		routerManagement, errRouterManagement := smartrouter.NewRouterManagementService(
+			routerMetadataStore,
+			routerSecretStore,
+			routerAuditSink,
+			service,
+		)
+		if errRouterManagement != nil {
+			return nil, fmt.Errorf("cliproxy: initialize router management: %w", errRouterManagement)
+		}
+		service.routerManagement = routerManagement
+	}
+	service.routerHealthPoller = smartrouter.NewRouterHealthPoller(
+		service.routerSnapshots,
+		service,
+		service.routerSelector.TransportHealthStore(),
+	)
 	if b.postAuthHook != nil {
 		service.serverOptions = append(service.serverOptions, api.WithPostAuthHook(b.postAuthHook))
 	}
 	service.serverOptions = append(service.serverOptions,
 		api.WithPostAuthPersistHook(service.runtimeAuthSyncHook()),
 		api.WithPluginHost(pluginHost),
+		api.WithSmartRouterSelector(service.routerSelector),
+		api.WithRouterManagementService(service.routerManagement),
+		api.WithRouterProber(service),
 		api.WithConfigReloadHook(func(_ context.Context, _ *config.Config) {
 			service.reloadConfigFromWatcher()
 		}),
 	)
 	return service, nil
+}
+
+func (b *Builder) prepareRouterStorage() (*config.Config, uint64, smartrouter.RouterMetadataStore, smartrouter.RouterSecretStore, smartrouter.RouterAuditSink, error) {
+	storageDirectory := filepath.Join(filepath.Dir(b.configPath), "router")
+	metadata, errMetadata := smartrouter.NewFileRouterMetadataStore(filepath.Join(storageDirectory, "metadata.json"))
+	if errMetadata != nil {
+		return nil, 0, nil, nil, nil, errMetadata
+	}
+	document, errLoad := metadata.LoadRouterMetadata(context.Background())
+	if errLoad != nil {
+		return nil, 0, nil, nil, nil, errLoad
+	}
+	cfg := b.cfg.CloneForRuntime()
+	if document.Revision == 0 {
+		created, errCreate := metadata.ReplaceRouterMetadata(context.Background(), 0, cfg.Router)
+		if errCreate != nil {
+			return nil, 0, nil, nil, nil, errCreate
+		}
+		document = created
+	} else {
+		cfg.Router = document.Router
+	}
+
+	var secrets smartrouter.RouterSecretStore
+	if encodedKey := strings.TrimSpace(os.Getenv("SMART_ROUTER_MASTER_KEY")); encodedKey != "" {
+		key, errKey := smartrouter.ParseRouterMasterKey(encodedKey)
+		if errKey != nil {
+			return nil, 0, nil, nil, nil, errKey
+		}
+		secretStore, errSecrets := smartrouter.NewEncryptedFileRouterSecretStore(filepath.Join(storageDirectory, "secrets.json"), key)
+		clear(key)
+		if errSecrets != nil {
+			return nil, 0, nil, nil, nil, errSecrets
+		}
+		secrets = secretStore
+	}
+	audit, errAudit := smartrouter.NewFileRouterAuditSink(filepath.Join(storageDirectory, "audit.jsonl"))
+	if errAudit != nil {
+		return nil, 0, nil, nil, nil, errAudit
+	}
+	return cfg, document.Revision, metadata, secrets, audit, nil
+}
+
+func routerConfigUsesSecrets(router internalconfig.RouterConfig) bool {
+	for index := range router.Upstreams {
+		if router.Upstreams[index].Auth.Type != "" && router.Upstreams[index].Auth.Type != internalconfig.RouterAuthNone {
+			return true
+		}
+	}
+	return false
+}
+
+func rejectRouterAuthDirectoryCredentials(authDirectory, routerStorageDirectory string) error {
+	resolved, errResolve := util.ResolveAuthDir(authDirectory)
+	if errResolve != nil {
+		return fmt.Errorf("validate router auth directory: %w", errResolve)
+	}
+	routerStorageDirectory, _ = filepath.Abs(filepath.Clean(routerStorageDirectory))
+	credentialFiles := 0
+	errWalk := filepath.WalkDir(resolved, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		absolutePath, _ := filepath.Abs(filepath.Clean(path))
+		if entry.IsDir() {
+			if absolutePath == routerStorageDirectory {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.EqualFold(filepath.Ext(entry.Name()), ".json") {
+			return nil
+		}
+		if strings.EqualFold(entry.Name(), "smartapi-affinity.json") {
+			return nil
+		}
+		credentialFiles++
+		return nil
+	})
+	if errWalk != nil && !errors.Is(errWalk, os.ErrNotExist) {
+		return fmt.Errorf("validate router auth directory: %w", errWalk)
+	}
+	if credentialFiles > 0 {
+		return fmt.Errorf("router auth directory contains %d local credential JSON file(s)", credentialFiles)
+	}
+	return nil
 }
 
 func (s *Service) runtimeAuthSyncHook() coreauth.PostAuthHook {

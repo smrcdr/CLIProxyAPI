@@ -17,4 +17,13 @@ func init() {
 			TokenCount: ClaudeTokenCount,
 		},
 	)
+	translator.Register(
+		Claude,
+		OpenaiResponse,
+		ConvertClaudeRequestToOpenAIResponses,
+		interfaces.TranslateResponse{
+			Stream:    ConvertOpenAIResponsesResponseToClaude,
+			NonStream: ConvertOpenAIResponsesResponseToClaudeNonStream,
+		},
+	)
 }

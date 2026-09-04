@@ -17,6 +17,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/smartrouter"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -144,6 +145,223 @@ func TestOAuthCallbackRouteSkipsManagementKeyMiddleware(t *testing.T) {
 	callbackPath := filepath.Join(server.cfg.AuthDir, ".oauth-gemini-cli-"+state+".oauth")
 	if _, errRead := os.ReadFile(callbackPath); errRead != nil {
 		t.Fatalf("expected callback file to be written without management key: %v", errRead)
+	}
+}
+
+func TestRouterRoleHidesLocalCredentialManagementAndOAuthRoutes(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
+	gin.SetMode(gin.TestMode)
+	directory := t.TempDir()
+	cfg := &proxyconfig.Config{
+		SDKConfig:   sdkconfig.SDKConfig{APIKeys: []string{"test-key"}},
+		ServiceRole: proxyconfig.ServiceRoleRouter,
+		AuthDir:     filepath.Join(directory, "auth"),
+	}
+	if err := os.MkdirAll(cfg.AuthDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll(auth) error = %v", err)
+	}
+	server := NewServer(
+		cfg,
+		auth.NewManager(nil, nil, nil),
+		sdkaccess.NewManager(),
+		filepath.Join(directory, "config.yaml"),
+	)
+
+	for _, target := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/codex/callback"},
+		{http.MethodGet, "/anthropic/callback"},
+		{http.MethodGet, "/antigravity/callback"},
+		{http.MethodGet, "/v0/management/oauth-callback"},
+		{http.MethodPost, "/v0/management/api-call"},
+		{http.MethodGet, "/v0/management/codex-accounts"},
+		{http.MethodGet, "/v0/management/auth-files"},
+		{http.MethodGet, "/v0/management/plugins"},
+		{http.MethodGet, "/v0/management/codex-api-key"},
+	} {
+		request := httptest.NewRequest(target.method, target.path, nil)
+		request.Header.Set("X-Management-Key", "test-management-key")
+		recorder := httptest.NewRecorder()
+		server.engine.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("%s status = %d, want 404 body=%s", target.path, recorder.Code, recorder.Body.String())
+		}
+	}
+
+	for _, path := range []string{
+		"/v0/management/api-keys",
+		"/v0/management/router/schemas/upstream-types",
+	} {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set("X-Management-Key", "test-management-key")
+		recorder := httptest.NewRecorder()
+		server.engine.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("%s status = %d, want 200 body=%s", path, recorder.Code, recorder.Body.String())
+		}
+	}
+}
+
+func TestRouterManagementPageAvailableOnlyForRouterRuntime(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	directory := t.TempDir()
+	metadata, err := smartrouter.NewFileRouterMetadataStore(filepath.Join(directory, "metadata.json"))
+	if err != nil {
+		t.Fatalf("NewFileRouterMetadataStore() error = %v", err)
+	}
+	service, err := smartrouter.NewRouterManagementService(metadata, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("NewRouterManagementService() error = %v", err)
+	}
+
+	cfg := &proxyconfig.Config{
+		ServiceRole: proxyconfig.ServiceRoleRouter,
+		AuthDir:     filepath.Join(directory, "auth"),
+	}
+	server := NewServer(cfg, auth.NewManager(nil, nil, nil), sdkaccess.NewManager(), filepath.Join(directory, "config.yaml"), WithRouterManagementService(service))
+
+	req := httptest.NewRequest(http.MethodGet, "/router-management.html", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("router page status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if got := rr.Header().Get("Content-Type"); got != "text/html; charset=utf-8" {
+		t.Fatalf("content type = %q", got)
+	}
+	if got := rr.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("cache control = %q", got)
+	}
+	if !strings.Contains(rr.Body.String(), "SmartRouter") {
+		t.Fatalf("router page does not contain its title")
+	}
+	if !strings.Contains(rr.Body.String(), "function openModelGroupForm(") {
+		t.Fatalf("router page is missing the model-group form opener")
+	}
+	if !strings.Contains(rr.Body.String(), "function openRouteForm(") {
+		t.Fatalf("router page is missing the route form opener")
+	}
+
+	for _, role := range []proxyconfig.ServiceRole{proxyconfig.ServiceRoleCombined, proxyconfig.ServiceRolePool} {
+		roleCfg := *cfg
+		roleCfg.ServiceRole = role
+		roleServer := NewServer(&roleCfg, auth.NewManager(nil, nil, nil), sdkaccess.NewManager(), filepath.Join(directory, string(role)+".yaml"), WithRouterManagementService(service))
+		roleReq := httptest.NewRequest(http.MethodGet, "/router-management.html", nil)
+		roleRR := httptest.NewRecorder()
+		roleServer.engine.ServeHTTP(roleRR, roleReq)
+		if roleRR.Code != http.StatusNotFound {
+			t.Fatalf("role %q status = %d, want %d", role, roleRR.Code, http.StatusNotFound)
+		}
+	}
+}
+
+func TestRouterManagementPageRequiresRouterManagementService(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	directory := t.TempDir()
+	cfg := &proxyconfig.Config{
+		ServiceRole: proxyconfig.ServiceRoleRouter,
+		AuthDir:     filepath.Join(directory, "auth"),
+	}
+	server := NewServer(cfg, auth.NewManager(nil, nil, nil), sdkaccess.NewManager(), filepath.Join(directory, "config.yaml"))
+	req := httptest.NewRequest(http.MethodGet, "/router-management.html", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotFound)
+	}
+}
+
+func TestRouterRoleModelsListUsesModelGroups(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	directory := t.TempDir()
+	cfg := &proxyconfig.Config{
+		SDKConfig:   sdkconfig.SDKConfig{APIKeys: []string{"test-key"}},
+		ServiceRole: proxyconfig.ServiceRoleRouter,
+		AuthDir:     filepath.Join(directory, "auth"),
+		Router: proxyconfig.RouterConfig{
+			Upstreams: []proxyconfig.RouterUpstream{{
+				ID:       "primary",
+				Name:     "Primary",
+				Protocol: proxyconfig.RouterProtocolOpenAIResponses,
+				BaseURL:  "https://primary.example/v1",
+				Capabilities: proxyconfig.RouterCapabilities{
+					Endpoints: []string{proxyconfig.RouterEndpointResponses},
+				},
+			}},
+			ModelGroups: []proxyconfig.RouterModelGroup{
+				{
+					ID:          "model-b",
+					PublicModel: "model-b",
+					Capability:  proxyconfig.RouterCapabilityText,
+					Routes: []proxyconfig.RouterRoute{{
+						ID:            "model-b-primary",
+						UpstreamID:    "primary",
+						UpstreamModel: "upstream-b",
+						Weight:        1,
+					}},
+				},
+				{
+					ID:          "model-a",
+					PublicModel: "model-a",
+					Capability:  proxyconfig.RouterCapabilityText,
+					Routes: []proxyconfig.RouterRoute{{
+						ID:            "model-a-primary",
+						UpstreamID:    "primary",
+						UpstreamModel: "upstream-a",
+						Weight:        1,
+					}},
+				},
+			},
+		},
+	}
+	if err := os.MkdirAll(cfg.AuthDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll(auth) error = %v", err)
+	}
+	snapshot, err := smartrouter.CompileSnapshot(cfg, 1)
+	if err != nil {
+		t.Fatalf("CompileSnapshot() error = %v", err)
+	}
+	selector := smartrouter.NewSelector(smartrouter.NewSnapshotStore(snapshot), nil)
+	server := NewServer(
+		cfg,
+		auth.NewManager(nil, nil, nil),
+		sdkaccess.NewManager(),
+		filepath.Join(directory, "config.yaml"),
+		WithSmartRouterSelector(selector),
+	)
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	request.Header.Set("Authorization", "Bearer test-key")
+	recorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Object string `json:"object"`
+		Data   []struct {
+			ID      string `json:"id"`
+			Object  string `json:"object"`
+			OwnedBy string `json:"owned_by"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("Unmarshal() error = %v body=%s", err, recorder.Body.String())
+	}
+	if response.Object != "list" || len(response.Data) != 2 {
+		t.Fatalf("response = %#v", response)
+	}
+	if response.Data[0].ID != "model-a" || response.Data[1].ID != "model-b" {
+		t.Fatalf("model order = %#v", response.Data)
+	}
+	for _, model := range response.Data {
+		if model.Object != "model" || model.OwnedBy != "smart-router" {
+			t.Fatalf("model = %#v", model)
+		}
 	}
 }
 
@@ -679,8 +897,8 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	if got, _ := custom["display_name"].(string); got != "Custom Codex Model" {
 		t.Fatalf("custom display_name = %q, want Custom Codex Model", got)
 	}
-	if got := int(codexClientTestPriority(custom["priority"])); got != 129 {
-		t.Fatalf("custom priority = %v, want 129", custom["priority"])
+	if got := int(codexClientTestPriority(custom["priority"])); got != 143 {
+		t.Fatalf("custom priority = %v, want 143", custom["priority"])
 	}
 	if got, _ := custom["description"].(string); got != "Custom model from registry" {
 		t.Fatalf("custom description = %q, want Custom model from registry", got)

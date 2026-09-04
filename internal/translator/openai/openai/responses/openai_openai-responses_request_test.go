@@ -383,3 +383,31 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreservesInputImag
 		t.Fatalf("messages.0.content.0.image_url.detail = %q, want high; output=%s", got, out)
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_NormalizesGenerationFields(t *testing.T) {
+	raw := []byte(`{
+		"model": "gpt-test",
+		"input": "hello",
+		"max_output_tokens": 432,
+		"service_tier": "priority",
+		"tool_choice": {"type":"function","name":"lookup"},
+		"text": {"format":{"type":"json_schema","name":"answer","schema":{"type":"object"},"strict":true}}
+	}`)
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-test", raw, false)
+
+	if got := gjson.GetBytes(out, "max_tokens").Int(); got != 432 {
+		t.Fatalf("max_tokens = %d, want 432; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "service_tier").String(); got != "priority" {
+		t.Fatalf("service_tier = %q, want priority; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "tool_choice.function.name").String(); got != "lookup" {
+		t.Fatalf("tool choice name = %q, want lookup; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "response_format.json_schema.name").String(); got != "answer" {
+		t.Fatalf("response format name = %q, want answer; output=%s", got, out)
+	}
+	if !gjson.GetBytes(out, "response_format.json_schema.schema").Exists() {
+		t.Fatalf("response format schema is missing; output=%s", out)
+	}
+}

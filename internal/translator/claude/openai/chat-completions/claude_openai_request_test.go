@@ -1,10 +1,41 @@
 package chat_completions
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/tidwall/gjson"
 )
+
+func TestConvertOpenAIRequestToClaude_InitializesRequestIdentityConcurrently(t *testing.T) {
+	const workers = 32
+	ids := make(chan string, workers)
+	var wait sync.WaitGroup
+	for range workers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			result := ConvertOpenAIRequestToClaude("claude-test", []byte(`{"messages":[{"role":"user","content":"hi"}]}`), false)
+			ids <- gjson.GetBytes(result, "metadata.user_id").String()
+		}()
+	}
+	wait.Wait()
+	close(ids)
+
+	var expected string
+	for id := range ids {
+		if id == "" {
+			t.Fatal("metadata.user_id is empty")
+		}
+		if expected == "" {
+			expected = id
+			continue
+		}
+		if id != expected {
+			t.Fatalf("metadata.user_id = %q, want stable value %q", id, expected)
+		}
+	}
+}
 
 func TestConvertOpenAIRequestToClaude_SanitizesToolCallIDsForClaude(t *testing.T) {
 	inputJSON := `{
@@ -404,5 +435,20 @@ func TestConvertOpenAIRequestToClaude_PartCacheControlWinsOverMessageLevel(t *te
 	}
 	if resultJSON.Get("messages.0.content.0.cache_control.ttl").Exists() {
 		t.Fatalf("part-level cache_control should win; unexpected ttl: %s", result)
+	}
+}
+
+func TestConvertOpenAIRequestToClaudePreservesDeveloperAndMaxCompletionTokens(t *testing.T) {
+	result := ConvertOpenAIRequestToClaude(
+		"claude-test",
+		[]byte(`{"model":"public","max_completion_tokens":777,"messages":[{"role":"developer","content":"Follow policy"},{"role":"user","content":"hello"}]}`),
+		false,
+	)
+	root := gjson.ParseBytes(result)
+	if got := root.Get("max_tokens").Int(); got != 777 {
+		t.Fatalf("max_tokens = %d, want 777. Output: %s", got, result)
+	}
+	if got := root.Get("system.0.text").String(); got != "Follow policy" {
+		t.Fatalf("developer instruction = %q, want Follow policy. Output: %s", got, result)
 	}
 }

@@ -18,6 +18,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginstore"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/smartapiusage"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/smartrouter"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -58,8 +60,22 @@ type Handler struct {
 	configReloadHook        func(context.Context, *config.Config)
 	pluginStoreRegistryURL  string
 	pluginStoreHTTPClient   pluginstore.HTTPDoer
+	smartAPIUsage           *smartapiusage.Store
 	pluginReleaseCacheMu    sync.Mutex
 	pluginReleaseCache      map[string]pluginReleaseCacheEntry
+	codexAccountMu          sync.RWMutex
+	codexRefreshLocks       map[string]*sync.Mutex
+	codexQuota              map[string]codexQuotaSnapshot
+	codexDeviceSessions     map[string]*codexDeviceSession
+	codexFingerprintSecret  []byte
+	codexPollerOnce         sync.Once
+	accountProxyMu          sync.RWMutex
+	accountProxyLoadOnce    sync.Once
+	accountProxyLoadErr     error
+	accountProxies          map[string]accountProxy
+	routerManagement        *smartrouter.RouterManagementService
+	routerSelector          *smartrouter.Selector
+	routerProber            smartrouter.RouterProber
 }
 
 type configReloadSnapshot struct {
@@ -80,6 +96,14 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		tokenStore:          sdkAuth.GetTokenStore(),
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
+		smartAPIUsage:       smartapiusage.DefaultStore(),
+		codexRefreshLocks:   make(map[string]*sync.Mutex),
+		codexQuota:          make(map[string]codexQuotaSnapshot),
+		codexDeviceSessions: make(map[string]*codexDeviceSession),
+		accountProxies:      make(map[string]accountProxy),
+		codexFingerprintSecret: []byte(strings.TrimSpace(
+			os.Getenv("CODEX_ACCOUNT_FINGERPRINT_SECRET"),
+		)),
 	}
 	h.startAttemptCleanup()
 	return h
@@ -157,6 +181,28 @@ func (h *Handler) SetConfigReloadHook(hook func(context.Context, *config.Config)
 	}
 	h.mu.Lock()
 	h.configReloadHook = hook
+	h.mu.Unlock()
+}
+
+// SetRouterManagementService updates the revisioned Smart Router management
+// service and its runtime circuit selector.
+func (h *Handler) SetRouterManagementService(service *smartrouter.RouterManagementService, selector *smartrouter.Selector) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.routerManagement = service
+	h.routerSelector = selector
+	h.mu.Unlock()
+}
+
+// SetRouterProber updates the non-inference Smart Router health prober.
+func (h *Handler) SetRouterProber(prober smartrouter.RouterProber) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.routerProber = prober
 	h.mu.Unlock()
 }
 

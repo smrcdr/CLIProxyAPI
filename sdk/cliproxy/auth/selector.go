@@ -2,11 +2,15 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"math"
 	"net/http"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -371,6 +375,177 @@ var sessionPattern = regexp.MustCompile(`_session_([a-f0-9-]+)$`)
 type SessionAffinitySelector struct {
 	fallback Selector
 	cache    *SessionCache
+}
+
+const smartAPIAffinityHeader = "X-SmartAPI-Affinity-Key"
+const smartAPIAffinityMaxEntries = 10000
+
+// SmartAPIAffinitySelector keeps SmartAPI client identities pinned to a credential.
+// It commits a new binding only after the conductor reports a successful execution.
+type SmartAPIAffinitySelector struct {
+	fallback Selector
+	store    *smartAPIAffinityStore
+	ttl      time.Duration
+}
+
+type smartAPIAffinityEntry struct {
+	AuthHash  string    `json:"auth_hash"`
+	ExpiresAt time.Time `json:"expires_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type smartAPIAffinityStore struct {
+	mu      sync.Mutex
+	path    string
+	entries map[string]smartAPIAffinityEntry
+}
+
+func newSmartAPIAffinityStore(path string) *smartAPIAffinityStore {
+	store := &smartAPIAffinityStore{path: path, entries: make(map[string]smartAPIAffinityEntry)}
+	if path == "" {
+		return store
+	}
+	body, errRead := os.ReadFile(path)
+	if errRead != nil {
+		return store
+	}
+	_ = json.Unmarshal(body, &store.entries)
+	store.cleanupLocked(time.Now())
+	return store
+}
+
+func smartAPIAffinityHash(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
+}
+
+func (s *smartAPIAffinityStore) load(key string, now time.Time) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.entries[key]
+	if !ok || !entry.ExpiresAt.After(now) {
+		if ok {
+			delete(s.entries, key)
+			s.persistLocked()
+		}
+		return "", false
+	}
+	return entry.AuthHash, true
+}
+
+func (s *smartAPIAffinityStore) save(key, authHash string, ttl time.Duration) {
+	now := time.Now()
+	s.mu.Lock()
+	s.entries[key] = smartAPIAffinityEntry{AuthHash: authHash, ExpiresAt: now.Add(ttl), UpdatedAt: now}
+	s.cleanupLocked(now)
+	s.persistLocked()
+	s.mu.Unlock()
+}
+
+func (s *smartAPIAffinityStore) cleanupLocked(now time.Time) {
+	for key, entry := range s.entries {
+		if !entry.ExpiresAt.After(now) {
+			delete(s.entries, key)
+		}
+	}
+	for len(s.entries) > smartAPIAffinityMaxEntries {
+		var oldestKey string
+		var oldest time.Time
+		for key, entry := range s.entries {
+			if oldestKey == "" || entry.UpdatedAt.Before(oldest) {
+				oldestKey, oldest = key, entry.UpdatedAt
+			}
+		}
+		delete(s.entries, oldestKey)
+	}
+}
+
+func (s *smartAPIAffinityStore) persistLocked() {
+	if s.path == "" {
+		return
+	}
+	body, errMarshal := json.Marshal(s.entries)
+	if errMarshal != nil {
+		return
+	}
+	if errMkdir := os.MkdirAll(filepath.Dir(s.path), 0700); errMkdir != nil {
+		return
+	}
+	temporary := s.path + ".tmp"
+	if errWrite := os.WriteFile(temporary, body, 0600); errWrite == nil {
+		_ = os.Rename(temporary, s.path)
+	}
+}
+
+// NewSmartAPIAffinitySelector creates a persistent affinity wrapper for trusted SmartAPI requests.
+func NewSmartAPIAffinitySelector(fallback Selector, storePath string, ttl time.Duration) *SmartAPIAffinitySelector {
+	if fallback == nil {
+		fallback = &RoundRobinSelector{}
+	}
+	if ttl <= 0 {
+		ttl = 30 * 24 * time.Hour
+	}
+	return &SmartAPIAffinitySelector{fallback: fallback, store: newSmartAPIAffinityStore(storePath), ttl: ttl}
+}
+
+func smartAPIHeader(headers http.Header) string {
+	if headers == nil {
+		return ""
+	}
+	return strings.TrimSpace(headers.Get(smartAPIAffinityHeader))
+}
+
+func (s *SmartAPIAffinitySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	identity := smartAPIHeader(opts.Headers)
+	if identity == "" {
+		return s.fallback.Pick(ctx, provider, model, opts, auths)
+	}
+	available, errAvailable := getAvailableAuths(auths, provider, model, time.Now())
+	if errAvailable != nil {
+		return nil, errAvailable
+	}
+	key := strings.ToLower(strings.TrimSpace(provider)) + "::" + smartAPIAffinityHash(identity)
+	if authHash, ok := s.store.load(key, time.Now()); ok {
+		for _, auth := range available {
+			if smartAPIAffinityHash(auth.ID) == authHash {
+				return auth, nil
+			}
+		}
+	}
+	var selected *Auth
+	var selectedScore [sha256.Size]byte
+	for _, auth := range available {
+		score := sha256.Sum256([]byte(identity + "\x00" + auth.ID))
+		if selected == nil || string(score[:]) > string(selectedScore[:]) {
+			selected, selectedScore = auth, score
+		}
+	}
+	if selected == nil {
+		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+	}
+	return selected, nil
+}
+
+// Commit records a successful SmartAPI request. Failed attempts intentionally leave the old binding intact.
+func (s *SmartAPIAffinitySelector) Commit(headers http.Header, provider, authID string) {
+	identity := smartAPIHeader(headers)
+	if identity == "" || strings.TrimSpace(authID) == "" {
+		return
+	}
+	key := strings.ToLower(strings.TrimSpace(provider)) + "::" + smartAPIAffinityHash(identity)
+	s.store.save(key, smartAPIAffinityHash(authID), s.ttl)
+}
+
+func (s *SmartAPIAffinitySelector) InvalidateAuth(authID string) {
+	if invalidator, ok := s.fallback.(interface{ InvalidateAuth(string) }); ok {
+		invalidator.InvalidateAuth(authID)
+	}
+}
+
+func (s *SmartAPIAffinitySelector) Stop() {
+	if stoppable, ok := s.fallback.(StoppableSelector); ok {
+		stoppable.Stop()
+	}
 }
 
 // SessionAffinityConfig configures the session affinity selector.

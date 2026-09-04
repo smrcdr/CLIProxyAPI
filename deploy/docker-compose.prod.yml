@@ -1,0 +1,36 @@
+name: smart-cli-proxy-prod
+
+services:
+  smart-cli-proxy-prod:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${VERSION:-prod}
+        COMMIT: ${COMMIT:-unknown}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
+    image: smart-cli-proxy:prod
+    container_name: smart-cli-proxy-prod
+    restart: unless-stopped
+    env_file:
+      - ${RUNTIME_DIR:-../runtime}/service.env
+    ports:
+      - "127.0.0.1:${HOST_PORT:-8322}:8317"
+    volumes:
+      # Smart Management persists key and settings changes to this file.
+      - ${RUNTIME_DIR:-../runtime}/config.yaml:/CLIProxyAPI/config.yaml:rw
+      - ${RUNTIME_DIR:-../runtime}/auths:/root/.cli-proxy-api
+      - ${RUNTIME_DIR:-../runtime}/logs:/CLIProxyAPI/logs
+    networks:
+      - smartapi-edge
+    healthcheck:
+      test: ["CMD-SHELL", "grep -aq CLIProxyAPI /proc/1/cmdline"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+networks:
+  smartapi-edge:
+    external: true
+    name: smartapi-edge

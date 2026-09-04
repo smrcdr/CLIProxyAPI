@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+	"sync"
 
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -23,10 +24,23 @@ import (
 )
 
 var (
-	user    = ""
-	account = ""
-	session = ""
+	user         string
+	account      string
+	session      string
+	identityOnce sync.Once
 )
+
+func requestUserID() string {
+	identityOnce.Do(func() {
+		accountUUID, _ := uuid.NewRandom()
+		account = accountUUID.String()
+		sessionUUID, _ := uuid.NewRandom()
+		session = sessionUUID.String()
+		sum := sha256.Sum256([]byte(account + session))
+		user = hex.EncodeToString(sum[:])
+	})
+	return fmt.Sprintf("user_%s_account_%s_session_%s", user, account, session)
+}
 
 // ConvertOpenAIRequestToClaude parses and transforms an OpenAI Chat Completions API request into Claude Code API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
@@ -48,19 +62,7 @@ var (
 func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream bool) []byte {
 	rawJSON := inputRawJSON
 
-	if account == "" {
-		u, _ := uuid.NewRandom()
-		account = u.String()
-	}
-	if session == "" {
-		u, _ := uuid.NewRandom()
-		session = u.String()
-	}
-	if user == "" {
-		sum := sha256.Sum256([]byte(account + session))
-		user = hex.EncodeToString(sum[:])
-	}
-	userID := fmt.Sprintf("user_%s_account_%s_session_%s", user, account, session)
+	userID := requestUserID()
 
 	// Base Claude Code API template with default max_tokens value
 	out := []byte(fmt.Sprintf(`{"model":"","max_tokens":32000,"messages":[],"metadata":{"user_id":"%s"}}`, userID))
@@ -133,7 +135,9 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	out, _ = sjson.SetBytes(out, "model", modelName)
 
 	// Max tokens configuration with fallback to default value
-	if maxTokens := root.Get("max_tokens"); maxTokens.Exists() {
+	if maxTokens := root.Get("max_completion_tokens"); maxTokens.Exists() {
+		out, _ = sjson.SetBytes(out, "max_tokens", maxTokens.Int())
+	} else if maxTokens := root.Get("max_tokens"); maxTokens.Exists() {
 		out, _ = sjson.SetBytes(out, "max_tokens", maxTokens.Int())
 	}
 
@@ -169,7 +173,7 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 			contentResult := message.Get("content")
 
 			switch role {
-			case "system":
+			case "system", "developer":
 				systemStart := len(gjson.GetBytes(out, "system").Array())
 				if contentResult.Exists() && contentResult.Type == gjson.String && contentResult.String() != "" {
 					textPart := []byte(`{"type":"text","text":""}`)

@@ -8,11 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/homeplugins"
@@ -21,6 +23,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/smartrouter"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/diff"
@@ -98,6 +101,30 @@ type Service struct {
 
 	// pluginHost owns dynamic plugin lifecycle and runtime capability adapters.
 	pluginHost *pluginhost.Host
+
+	// routerSnapshots holds immutable model-routing configuration revisions.
+	routerSnapshots *smartrouter.SnapshotStore
+
+	// routerSelector owns request-scoped scheduling and route circuit state.
+	routerSelector *smartrouter.Selector
+
+	// routerUpstreamRuntime owns runtime-only auth and executors for configured upstreams.
+	routerUpstreamRuntime *routerUpstreamRuntime
+
+	// routerMetadataStore persists the complete revisioned routing document.
+	routerMetadataStore smartrouter.RouterMetadataStore
+
+	// routerSecretStore persists encrypted upstream secrets.
+	routerSecretStore smartrouter.RouterSecretStore
+
+	// routerAuditSink records masked router management mutations.
+	routerAuditSink smartrouter.RouterAuditSink
+
+	// routerManagement coordinates management persistence and runtime commits.
+	routerManagement *smartrouter.RouterManagementService
+
+	// routerHealthPoller observes configured non-inference health endpoints.
+	routerHealthPoller *smartrouter.RouterHealthPoller
 
 	// shutdownOnce ensures shutdown is called only once.
 	shutdownOnce sync.Once
@@ -509,6 +536,9 @@ func (s *Service) handleAuthUpdates(ctx context.Context, updates []watcher.AuthU
 	cfg := s.cfg
 	s.cfgMu.RUnlock()
 	if cfg == nil || s.coreManager == nil {
+		return
+	}
+	if cfg.ServiceRole == internalconfig.ServiceRoleRouter {
 		return
 	}
 
@@ -1259,11 +1289,15 @@ func (s *Service) applyConfigUpdateWithAuthSynthesis(newCfg *config.Config, synt
 	previousStrategy := ""
 	var previousSessionAffinity bool
 	var previousSessionAffinityTTL string
+	var previousSmartAPIAffinity bool
+	var previousSmartAPIAffinityTTL string
 	s.cfgMu.RLock()
 	if s.cfg != nil {
 		previousStrategy = strings.ToLower(strings.TrimSpace(s.cfg.Routing.Strategy))
 		previousSessionAffinity = s.cfg.Routing.SessionAffinity
 		previousSessionAffinityTTL = s.cfg.Routing.SessionAffinityTTL
+		previousSmartAPIAffinity = s.cfg.Routing.SmartAPIAffinity
+		previousSmartAPIAffinityTTL = s.cfg.Routing.SmartAPIAffinityTTL
 	}
 	s.cfgMu.RUnlock()
 
@@ -1274,6 +1308,43 @@ func (s *Service) applyConfigUpdateWithAuthSynthesis(newCfg *config.Config, synt
 	}
 	if newCfg == nil {
 		return
+	}
+
+	nextRouterRevision := uint64(1)
+	if s.routerSnapshots != nil {
+		if current := s.routerSnapshots.Load(); current != nil {
+			nextRouterRevision = current.Revision() + 1
+		}
+	}
+	if s.routerMetadataStore != nil && newCfg.ServiceRole == internalconfig.ServiceRoleRouter {
+		s.cfgMu.RLock()
+		activeCfg := s.cfg.CloneForRuntime()
+		s.cfgMu.RUnlock()
+		if activeCfg != nil && activeCfg.ServiceRole == internalconfig.ServiceRoleRouter {
+			managedCfg := newCfg.CloneForRuntime()
+			managedCfg.Router = activeCfg.Router
+			newCfg = managedCfg
+			if current := s.routerSnapshots.Load(); current != nil {
+				nextRouterRevision = current.Revision()
+			}
+		}
+	}
+	nextRouterSnapshot, errRouterSnapshot := smartrouter.CompileSnapshot(newCfg, nextRouterRevision)
+	if errRouterSnapshot != nil {
+		log.WithError(errRouterSnapshot).Error("rejected invalid router configuration update")
+		return
+	}
+	if newCfg.ServiceRole != internalconfig.ServiceRoleRouter {
+		nextRouterSnapshot = smartrouter.EmptySnapshotAtRevision(nextRouterRevision)
+	}
+	var nextRouterRuntimePlan *routerUpstreamPlan
+	if s.routerUpstreamRuntime != nil {
+		var errPrepareRouterRuntime error
+		nextRouterRuntimePlan, errPrepareRouterRuntime = s.routerUpstreamRuntime.Prepare(context.Background(), newCfg, nextRouterSnapshot)
+		if errPrepareRouterRuntime != nil {
+			log.WithError(errPrepareRouterRuntime).Error("rejected router configuration update because upstream credentials are unavailable")
+			return
+		}
 	}
 
 	nextStrategy := strings.ToLower(strings.TrimSpace(newCfg.Routing.Strategy))
@@ -1290,10 +1361,14 @@ func (s *Service) applyConfigUpdateWithAuthSynthesis(newCfg *config.Config, synt
 
 	nextSessionAffinity := newCfg.Routing.SessionAffinity
 	nextSessionAffinityTTL := newCfg.Routing.SessionAffinityTTL
+	nextSmartAPIAffinity := newCfg.Routing.SmartAPIAffinity
+	nextSmartAPIAffinityTTL := newCfg.Routing.SmartAPIAffinityTTL
 
 	selectorChanged := previousStrategy != nextStrategy ||
 		previousSessionAffinity != nextSessionAffinity ||
-		previousSessionAffinityTTL != nextSessionAffinityTTL
+		previousSessionAffinityTTL != nextSessionAffinityTTL ||
+		previousSmartAPIAffinity != nextSmartAPIAffinity ||
+		previousSmartAPIAffinityTTL != nextSmartAPIAffinityTTL
 
 	if s.coreManager != nil && selectorChanged {
 		var selector coreauth.Selector
@@ -1316,6 +1391,15 @@ func (s *Service) applyConfigUpdateWithAuthSynthesis(newCfg *config.Config, synt
 				TTL:      ttl,
 			})
 		}
+		if nextSmartAPIAffinity {
+			ttl := 30 * 24 * time.Hour
+			if ttlStr := strings.TrimSpace(nextSmartAPIAffinityTTL); ttlStr != "" {
+				if parsed, errParse := time.ParseDuration(ttlStr); errParse == nil && parsed > 0 {
+					ttl = parsed
+				}
+			}
+			selector = coreauth.NewSmartAPIAffinitySelector(selector, filepath.Join(newCfg.AuthDir, "smartapi-affinity.json"), ttl)
+		}
 
 		s.coreManager.SetSelector(selector)
 	}
@@ -1325,6 +1409,20 @@ func (s *Service) applyConfigUpdateWithAuthSynthesis(newCfg *config.Config, synt
 	s.applyPprofConfig(newCfg)
 	if s.server != nil {
 		s.server.UpdateClients(newCfg)
+	}
+	if s.routerSelector != nil {
+		if errSwap := s.routerSelector.SwapSnapshot(nextRouterSnapshot); errSwap != nil {
+			log.WithError(errSwap).Error("failed to swap router configuration snapshot")
+			return
+		}
+	} else if s.routerSnapshots == nil {
+		s.routerSnapshots = smartrouter.NewSnapshotStore(nextRouterSnapshot)
+	} else if errSwap := s.routerSnapshots.Swap(nextRouterSnapshot); errSwap != nil {
+		log.WithError(errSwap).Error("failed to swap router configuration snapshot")
+		return
+	}
+	if s.routerSelector == nil {
+		s.routerSelector = smartrouter.NewSelector(s.routerSnapshots, nil)
 	}
 	s.cfgMu.Lock()
 	s.cfg = newCfg
@@ -1353,6 +1451,12 @@ func (s *Service) applyConfigUpdateWithAuthSynthesis(newCfg *config.Config, synt
 		}
 	}
 	s.syncPluginModelRuntime(ctx)
+	if s.routerUpstreamRuntime != nil && nextRouterRuntimePlan != nil {
+		if errApplyRouterRuntime := s.routerUpstreamRuntime.Apply(context.Background(), nextRouterRuntimePlan); errApplyRouterRuntime != nil {
+			log.WithError(errApplyRouterRuntime).Error("failed to apply prepared router upstream runtime")
+			return
+		}
+	}
 }
 
 func (s *Service) reloadConfigFromWatcher() bool {
@@ -1616,6 +1720,13 @@ func (s *Service) Run(ctx context.Context) error {
 
 	usage.StartDefault(ctx)
 	homeEnabled := s.cfg != nil && s.cfg.Home.Enabled
+	routerRole := s.cfg != nil && s.cfg.ServiceRole == internalconfig.ServiceRoleRouter
+	if routerRole {
+		routerStorageDirectory := filepath.Join(filepath.Dir(s.configPath), "router")
+		if errIsolation := rejectRouterAuthDirectoryCredentials(s.cfg.AuthDir, routerStorageDirectory); errIsolation != nil {
+			return fmt.Errorf("cliproxy: %w", errIsolation)
+		}
+	}
 	if homeEnabled {
 		forceHomeRuntimeConfig(s.cfg)
 		redisqueue.SetUsageStatisticsEnabled(true)
@@ -1638,8 +1749,10 @@ func (s *Service) Run(ctx context.Context) error {
 	s.applyRetryConfig(s.cfg)
 	s.configureCooldownStateStore(s.cfg)
 
-	s.registerPluginAuthParser()
-	if s.coreManager != nil && !homeEnabled {
+	if !routerRole {
+		s.registerPluginAuthParser()
+	}
+	if s.coreManager != nil && !homeEnabled && !routerRole {
 		if errLoad := s.coreManager.Load(ctx); errLoad != nil {
 			log.Warnf("failed to load auth store: %v", errLoad)
 		}
@@ -1651,7 +1764,7 @@ func (s *Service) Run(ctx context.Context) error {
 		}
 	}
 
-	if !homeEnabled {
+	if !homeEnabled && !routerRole {
 		tokenResult, err := s.tokenProvider.Load(ctx, s.cfg)
 		if err != nil && !errors.Is(err, context.Canceled) {
 			return err
@@ -1685,6 +1798,18 @@ func (s *Service) Run(ctx context.Context) error {
 	s.syncPluginRuntimeConfig(ctx)
 	if homeEnabled {
 		s.syncPluginModelRuntime(ctx)
+	}
+	if s.routerUpstreamRuntime != nil {
+		runtimeSnapshot := smartrouter.EmptySnapshot()
+		if s.cfg != nil && s.cfg.ServiceRole == internalconfig.ServiceRoleRouter {
+			runtimeSnapshot = s.routerSnapshots.Load()
+		}
+		if errRouterRuntime := s.routerUpstreamRuntime.Reconcile(ctx, s.cfg, runtimeSnapshot); errRouterRuntime != nil {
+			return fmt.Errorf("cliproxy: initialize smart router upstream runtime: %w", errRouterRuntime)
+		}
+	}
+	if routerRole && s.routerHealthPoller != nil {
+		go s.routerHealthPoller.Run(ctx)
 	}
 
 	if s.authManager == nil {
@@ -1751,7 +1876,9 @@ func (s *Service) Run(ctx context.Context) error {
 			watcherWrapper.SetAuthUpdateQueue(s.authUpdates)
 		}
 		watcherWrapper.SetConfig(s.cfg)
-		s.registerPluginAuthParser()
+		if !routerRole {
+			s.registerPluginAuthParser()
+		}
 
 		watcherCtx, watcherCancel := context.WithCancel(context.Background())
 		s.watcherCancel = watcherCancel
@@ -1765,7 +1892,7 @@ func (s *Service) Run(ctx context.Context) error {
 	s.registerModelRefreshCallback()
 
 	// Prefer core auth manager auto refresh if available.
-	if s.coreManager != nil && !homeEnabled {
+	if s.coreManager != nil && !homeEnabled && !routerRole {
 		interval := 15 * time.Minute
 		s.coreManager.StartAutoRefresh(context.Background(), interval)
 		log.Infof("core auth auto-refresh started (interval=%s)", interval)

@@ -5,6 +5,56 @@ host: ""
 # Server port
 port: 8317
 
+# Runtime responsibility. Existing deployments default to "combined".
+# Production SmartAPI deployments should explicitly use "router" or "pool".
+service-role: combined
+# pool-kind: codex # Required only when service-role is "pool".
+
+# SmartRouter registry. A pool deployment must not define this section.
+# router:
+#   # Public HTTPS targets are allowed by default. HTTP and private targets
+#   # require explicit policy entries; redirect hosts are always explicit.
+#   network-policy:
+#     allow-http: true
+#     allowed-private-hosts: [codex-pool]
+#     allowed-private-cidrs: [172.16.0.0/12]
+#     allowed-redirect-hosts: []
+#   upstreams:
+#     - id: codex-pool-eu
+#       name: Codex pool EU
+#       enabled: true
+#       protocol: openai-responses
+#       base-url: "http://codex-pool:8317/v1"
+#       auth:
+#         type: bearer
+#         secret-ref: upstream/codex-pool-eu
+#       capabilities:
+#         endpoints: [responses]
+#         streaming: true
+#         tools: true
+#         vision-input: true
+#       health-check:
+#         mode: http
+#         path: /healthz
+#         interval: 30s
+#         unhealthy-threshold: 3
+#         healthy-threshold: 2
+#       trusted-pool: true
+#       forward-smartapi-affinity: true
+#   model-groups:
+#     - id: gpt-5-6-sol
+#       public-model: gpt-5.6-sol
+#       capability: text
+#       selection:
+#         strategy: weighted-affinity
+#         affinity-ttl: 720h
+#       routes:
+#         - id: gpt-5-6-sol-codex-primary
+#           upstream-id: codex-pool-eu
+#           upstream-model: gpt-5.6-sol
+#           priority: 100
+#           weight: 100
+
 # TLS settings for HTTPS. When enabled, the server listens with the provided certificate and key.
 tls:
   enable: false
@@ -35,7 +85,8 @@ remote-management:
 # Authentication directory (supports ~ for home directory)
 auth-dir: "~/.cli-proxy-api"
 
-# API keys for authentication
+# API keys for authentication. In router role these inference keys must differ
+# from the management key.
 api-keys:
   - "your-api-key-1"
   - "your-api-key-2"
@@ -119,6 +170,16 @@ request-retry: 3
 # Maximum number of different credentials to try for one failed request.
 # Set to 0 to keep legacy behavior (try all available credentials).
 max-retry-credentials: 0
+# Bound the total retry chain and each non-streaming credential attempt for SmartAPI-style deployments.
+# retry-budget-ms: 300000
+# credential-attempt-timeout-ms: 180000
+
+# Optional model-specific Anthropic system instructions. Rules match the requested alias first.
+# model-instructions:
+#   gpt-5.5:
+#     enabled: true
+#     mode: prepend # prepend, append, or override
+#     prompt: "Keep answers concise."
 
 # Maximum wait time in seconds for a cooled-down credential before triggering a retry.
 max-retry-interval: 30
@@ -176,6 +237,9 @@ routing:
   session-affinity: false # default: false
   # How long session-to-auth bindings are retained. Default: 1h
   session-affinity-ttl: "1h"
+  # Persist affinity for trusted SmartAPI client identities (X-SmartAPI-Affinity-Key).
+  smartapi-affinity: false
+  smartapi-affinity-ttl: "720h"
 
 # Codex provider behavior.
 codex:

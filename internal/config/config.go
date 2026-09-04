@@ -29,6 +29,16 @@ const (
 // Config represents the application's configuration, loaded from a YAML file.
 type Config struct {
 	SDKConfig `yaml:",inline"`
+	// ServiceRole selects the runtime responsibility for this process.
+	// Empty values are normalized to "combined" for backward compatibility.
+	ServiceRole ServiceRole `yaml:"service-role,omitempty" json:"service-role"`
+	// PoolKind identifies the account-pool implementation when ServiceRole is "pool".
+	PoolKind string `yaml:"pool-kind,omitempty" json:"pool-kind,omitempty"`
+	// Router configures upstream and model-group routing for router-capable roles.
+	Router RouterConfig `yaml:"router,omitempty" json:"router"`
+	// SmartManagementEnabled exposes the embedded SmartAPI management page and endpoints.
+	// Access to API endpoints is still protected by the management key middleware.
+	SmartManagementEnabled bool `yaml:"smart-management-enabled" json:"smart-management-enabled"`
 	// Host is the network host/interface on which the API server will bind.
 	// Default is empty ("") to bind all interfaces (IPv4 + IPv6). Use "127.0.0.1" or "localhost" for local-only access.
 	Host string `yaml:"host" json:"-"`
@@ -99,6 +109,12 @@ type Config struct {
 	MaxRetryCredentials int `yaml:"max-retry-credentials" json:"max-retry-credentials"`
 	// MaxRetryInterval defines the maximum wait time in seconds before retrying a cooled-down credential.
 	MaxRetryInterval int `yaml:"max-retry-interval" json:"max-retry-interval"`
+	// RetryBudgetMS bounds the whole cross-credential retry chain. Zero disables the budget.
+	RetryBudgetMS int `yaml:"retry-budget-ms" json:"retry-budget-ms"`
+	// CredentialAttemptTimeoutMS bounds a single non-streaming upstream attempt. Zero disables it.
+	CredentialAttemptTimeoutMS int `yaml:"credential-attempt-timeout-ms" json:"credential-attempt-timeout-ms"`
+	// ModelInstructions applies a system instruction to requests for a client-visible model alias.
+	ModelInstructions map[string]ModelInstruction `yaml:"model-instructions" json:"model-instructions"`
 
 	// QuotaExceeded defines the behavior when a quota is exceeded.
 	QuotaExceeded QuotaExceeded `yaml:"quota-exceeded" json:"quota-exceeded"`
@@ -167,6 +183,13 @@ type Config struct {
 
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
+}
+
+// ModelInstruction is a model-specific system instruction applied to Claude payloads.
+type ModelInstruction struct {
+	Enabled bool   `yaml:"enabled" json:"enabled"`
+	Mode    string `yaml:"mode" json:"mode"`
+	Prompt  string `yaml:"prompt" json:"prompt"`
 }
 
 // PluginsConfig holds dynamic plugin system settings.
@@ -347,6 +370,11 @@ type RoutingConfig struct {
 	// SessionAffinityTTL specifies how long session-to-auth bindings are retained.
 	// Default: 1h. Accepts duration strings like "30m", "1h", "2h30m".
 	SessionAffinityTTL string `yaml:"session-affinity-ttl,omitempty" json:"session-affinity-ttl,omitempty"`
+
+	// SmartAPIAffinity enables persistent client-key affinity for trusted SmartAPI traffic.
+	SmartAPIAffinity bool `yaml:"smartapi-affinity,omitempty" json:"smartapi-affinity,omitempty"`
+	// SmartAPIAffinityTTL controls the persisted binding lifetime. Default: 720h.
+	SmartAPIAffinityTTL string `yaml:"smartapi-affinity-ttl,omitempty" json:"smartapi-affinity-ttl,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
@@ -702,6 +730,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 				// Missing and optional: return empty config (cloud deploy standby).
 				cfg := &Config{}
 				cfg.NormalizePluginsConfig()
+				if errRouter := finalizeRouterConfig(cfg, true); errRouter != nil {
+					return nil, errRouter
+				}
 				return cfg, nil
 			}
 		}
@@ -712,6 +743,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	if optional && len(data) == 0 {
 		cfg := &Config{}
 		cfg.NormalizePluginsConfig()
+		if errRouter := finalizeRouterConfig(cfg, true); errRouter != nil {
+			return nil, errRouter
+		}
 		return cfg, nil
 	}
 
@@ -737,6 +771,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
 			cfgOptional := &Config{}
 			cfgOptional.NormalizePluginsConfig()
+			if errRouter := finalizeRouterConfig(cfgOptional, true); errRouter != nil {
+				return nil, errRouter
+			}
 			return cfgOptional, nil
 		}
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
@@ -819,6 +856,10 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()
+
+	if errRouter := finalizeRouterConfig(&cfg, true); errRouter != nil {
+		return nil, errRouter
+	}
 
 	// Return the populated configuration struct.
 	return &cfg, nil
@@ -1207,6 +1248,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-excluded-models")
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-model-alias")
+	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "model-instructions")
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "plugins", "configs")
 
 	// Merge generated into original in-place, preserving comments/order of existing nodes.
@@ -1487,6 +1529,8 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 			return node.Value == "plugins"
 		case "routing.strategy":
 			return node.Value == "round-robin"
+		case "service-role":
+			return node.Value == string(ServiceRoleCombined)
 		}
 	}
 

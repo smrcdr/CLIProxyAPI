@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/smartrouter"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/tidwall/gjson"
@@ -82,6 +83,58 @@ func TestImagesModelValidationAllowsOpenAICompatImageModels(t *testing.T) {
 	}
 	if isSupportedImagesModel("compat-chat-model") {
 		t.Fatal("expected non-image openai-compatibility model to be rejected")
+	}
+}
+
+func TestImagesGenerationValidationAllowsSmartRouterImageModel(t *testing.T) {
+	cfg := &internalconfig.Config{
+		ServiceRole: internalconfig.ServiceRoleRouter,
+		Router: internalconfig.RouterConfig{
+			Upstreams: []internalconfig.RouterUpstream{
+				{
+					ID:       "image-upstream",
+					Name:     "Image upstream",
+					Protocol: internalconfig.RouterProtocolOpenAIResponses,
+					BaseURL:  "https://images.example.com/v1",
+					Capabilities: internalconfig.RouterCapabilities{
+						Endpoints:       []string{internalconfig.RouterEndpointResponses, internalconfig.RouterEndpointImages},
+						ImageGeneration: true,
+					},
+				},
+			},
+			ModelGroups: []internalconfig.RouterModelGroup{
+				{
+					ID:          "public-image",
+					PublicModel: "public-image",
+					Capability:  internalconfig.RouterCapabilityImage,
+					Routes: []internalconfig.RouterRoute{
+						{
+							ID:            "public-image-primary",
+							UpstreamID:    "image-upstream",
+							UpstreamModel: "upstream-image",
+							Priority:      100,
+							Weight:        100,
+						},
+					},
+				},
+			},
+		},
+	}
+	snapshot, err := smartrouter.CompileSnapshot(cfg, 1)
+	if err != nil {
+		t.Fatalf("CompileSnapshot() error = %v", err)
+	}
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	base.SetSmartRouterSelector(smartrouter.NewSelector(smartrouter.NewSnapshotStore(snapshot), nil))
+	handler := NewOpenAIAPIHandler(base)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+
+	if handler.rejectUnsupportedImagesGenerationModel(context, "public-image") {
+		t.Fatalf("SmartRouter image model was rejected: %s", recorder.Body.String())
+	}
+	if !rejectUnsupportedImagesModel(context, "public-image") {
+		t.Fatal("test model unexpectedly exists in the legacy static image registry")
 	}
 }
 

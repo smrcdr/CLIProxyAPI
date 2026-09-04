@@ -38,7 +38,8 @@ import (
 // ClaudeExecutor is a stateless executor for Anthropic Claude over the messages API.
 // If api_key is unavailable on auth, it falls back to legacy via ClientAdapter.
 type ClaudeExecutor struct {
-	cfg *config.Config
+	cfg      *config.Config
+	provider string
 }
 
 // claudeToolPrefix is empty to match real Claude Code behavior (no tool name prefix).
@@ -149,9 +150,31 @@ var oauthToolsToRemove = map[string]bool{}
 // omit max_tokens. Prefer registered model metadata before using a fallback.
 const defaultModelMaxTokens = 1024
 
-func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor { return &ClaudeExecutor{cfg: cfg} }
+func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor {
+	return NewClaudeExecutorForProvider("claude", cfg)
+}
 
-func (e *ClaudeExecutor) Identifier() string { return "claude" }
+// NewClaudeExecutorForProvider creates an Anthropic-compatible executor under
+// a stable route provider ID.
+func NewClaudeExecutorForProvider(provider string, cfg *config.Config) *ClaudeExecutor {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		provider = "claude"
+	}
+	return &ClaudeExecutor{cfg: cfg, provider: provider}
+}
+
+func (e *ClaudeExecutor) Identifier() string {
+	if e == nil || strings.TrimSpace(e.provider) == "" {
+		return "claude"
+	}
+	return e.provider
+}
+
+// RequestToFormat reports the Anthropic Messages wire format.
+func (e *ClaudeExecutor) RequestToFormat(cliproxyexecutor.Request, cliproxyexecutor.Options) sdktranslator.Format {
+	return sdktranslator.FormatClaude
+}
 
 // PrepareRequest injects Claude credentials into the outgoing HTTP request.
 func (e *ClaudeExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
@@ -240,6 +263,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+	body = helps.ApplyModelInstruction(e.cfg, requestedModel, baseModel, body)
 	body = ensureModelMaxTokens(body, baseModel)
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
@@ -433,6 +457,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+	body = helps.ApplyModelInstruction(e.cfg, requestedModel, baseModel, body)
 	body = ensureModelMaxTokens(body, baseModel)
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)

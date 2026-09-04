@@ -26,7 +26,9 @@ import (
 // Returns:
 //   - *http.Client: An HTTP client with configured proxy or transport
 func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
-	httpClient := &http.Client{}
+	httpClient := &http.Client{
+		CheckRedirect: rejectCrossOriginRedirect,
+	}
 	if timeout > 0 {
 		httpClient.Timeout = timeout
 	}
@@ -47,6 +49,7 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		transport := buildProxyTransport(proxyURL)
 		if transport != nil {
 			httpClient.Transport = transport
+			applyRouterNetworkPolicy(httpClient, cfg)
 			return httpClient
 		}
 		// If proxy setup failed, log and fall through to context RoundTripper
@@ -58,7 +61,19 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		httpClient.Transport = rt
 	}
 
+	applyRouterNetworkPolicy(httpClient, cfg)
 	return httpClient
+}
+
+func rejectCrossOriginRedirect(req *http.Request, via []*http.Request) error {
+	if req == nil || req.URL == nil || len(via) == 0 || via[0] == nil || via[0].URL == nil {
+		return nil
+	}
+	origin := via[0].URL
+	if !strings.EqualFold(req.URL.Scheme, origin.Scheme) || !strings.EqualFold(req.URL.Host, origin.Host) {
+		return http.ErrUseLastResponse
+	}
+	return nil
 }
 
 // buildProxyTransport creates an HTTP transport configured for the given proxy URL.

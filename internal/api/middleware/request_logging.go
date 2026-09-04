@@ -30,7 +30,7 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 			return
 		}
 
-		if shouldSkipMethodForRequestLogging(c.Request) {
+		if shouldSkipRequestForRequestLogging(c.Request) {
 			c.Next()
 			return
 		}
@@ -108,6 +108,19 @@ func shouldSkipMethodForRequestLogging(req *http.Request) bool {
 		return false
 	}
 	return !isResponsesWebsocketUpgrade(req)
+}
+
+func shouldSkipRequestForRequestLogging(req *http.Request) bool {
+	if shouldSkipMethodForRequestLogging(req) {
+		return true
+	}
+	if req == nil || req.URL == nil {
+		return false
+	}
+	path := strings.TrimSuffix(req.URL.Path, "/")
+	return path == "/v1/images/generations" ||
+		path == "/images/generations" ||
+		strings.HasPrefix(path, "/v0/management/router")
 }
 
 func isResponsesWebsocketUpgrade(req *http.Request) bool {

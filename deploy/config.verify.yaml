@@ -1,0 +1,55 @@
+# Secret-free dev verification config. Never use this file for real traffic.
+host: ""
+port: 8317
+auth-dir: "/root/.cli-proxy-api"
+
+remote-management:
+  allow-remote: true
+  secret-key: "verify-management-key"
+  disable-control-panel: true
+
+api-keys:
+  - "verify-router-key"
+
+debug: false
+logging-to-file: false
+usage-statistics-enabled: true
+request-retry: 0
+max-retry-credentials: 0
+max-retry-interval: 0
+retry-budget-ms: 300000
+credential-attempt-timeout-ms: 180000
+disable-claude-cloak-mode: true
+
+routing:
+  strategy: "round-robin"
+  session-affinity: true
+  session-affinity-ttl: "1h"
+  smartapi-affinity: true
+  smartapi-affinity-ttl: "720h"
+
+model-instructions:
+  gpt-5.5:
+    enabled: true
+    mode: prepend
+    prompt: "VERIFY_PREPEND_RULE"
+
+payload:
+  override:
+    - models:
+        - name: "qwen3.7-plus"
+          protocol: "openai"
+      params:
+        reasoning_effort: "none"
+
+openai-compatibility:
+  - name: "opencode-go-verify"
+    base-url: "http://fake-upstream:9000/v1"
+    api-key-entries:
+      - api-key: "verify-credential-one"
+      - api-key: "verify-credential-two"
+      - api-key: "verify-credential-three"
+    models:
+      - name: "qwen3.7-plus"
+        alias: "gpt-5.5"
+        force-mapping: true

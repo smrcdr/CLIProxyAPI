@@ -1,0 +1,121 @@
+name: smart-cli-proxy-dev
+
+services:
+  cliproxyapi-dev:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${VERSION:-dev}
+        COMMIT: ${COMMIT:-unknown}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
+    image: smart-cli-proxy:dev
+    container_name: cliproxyapi-dev
+    restart: unless-stopped
+    env_file:
+      - ${RUNTIME_DIR:-../runtime}/service.env
+    ports:
+      - "127.0.0.1:8322:8317"
+    volumes:
+      - ${RUNTIME_DIR:-../runtime}/config.yaml:/CLIProxyAPI/config.yaml:ro
+      - ${RUNTIME_DIR:-../runtime}/auths:/root/.cli-proxy-api
+      - ${RUNTIME_DIR:-../runtime}/logs:/CLIProxyAPI/logs
+    networks:
+      - smartapi-edge
+    healthcheck:
+      test: ["CMD-SHELL", "grep -aq CLIProxyAPI /proc/1/cmdline"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  fake-upstream:
+    image: node:22-alpine
+    container_name: cliproxyapi-fake-upstream-v2
+    profiles: ["test"]
+    restart: "no"
+    working_dir: /app
+    command: ["node", "fake-upstream.mjs"]
+    volumes:
+      - ./fake-upstream.mjs:/app/fake-upstream.mjs:ro
+    networks:
+      - smartapi-edge
+
+  cliproxyapi-verify:
+    image: smart-cli-proxy:dev
+    container_name: cliproxyapi-verify
+    profiles: ["test"]
+    restart: "no"
+    ports:
+      - "127.0.0.1:8323:8317"
+    volumes:
+      - ${VERIFY_CONFIG:-./config.verify.yaml}:/CLIProxyAPI/config.yaml
+    tmpfs:
+      - /root/.cli-proxy-api
+      - /CLIProxyAPI/logs
+    networks:
+      - smartapi-edge
+    depends_on:
+      - fake-upstream
+
+  smart-router:
+    profiles: ["router"]
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${ROUTER_VERSION:-router-dev}
+        COMMIT: ${ROUTER_COMMIT:-unknown}
+        BUILD_DATE: ${ROUTER_BUILD_DATE:-unknown}
+    image: ${ROUTER_IMAGE:-smart-cli-proxy:router-dev}
+    container_name: smart-router-dev
+    restart: unless-stopped
+    env_file:
+      - ${ROUTER_RUNTIME_DIR:-../runtime/router}/service.env
+    ports:
+      - "127.0.0.1:${ROUTER_HOST_PORT:-8323}:8317"
+    volumes:
+      - ${ROUTER_RUNTIME_DIR:-../runtime/router}/config.yaml:/CLIProxyAPI/config.yaml:ro
+      - ${ROUTER_RUNTIME_DIR:-../runtime/router}/state:/CLIProxyAPI/router
+    tmpfs:
+      - /root/.cli-proxy-api
+      - /CLIProxyAPI/logs
+    networks:
+      - smartapi-edge
+    depends_on:
+      router-fake-upstream:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "grep -aq CLIProxyAPI /proc/1/cmdline"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+      start_period: 20s
+
+  router-fake-upstream:
+    profiles: ["router"]
+    image: node:22-alpine
+    container_name: smart-router-fake-upstream
+    restart: unless-stopped
+    working_dir: /app
+    command: ["node", "router-fake-upstream.mjs"]
+    volumes:
+      - ./router-fake-upstream.mjs:/app/router-fake-upstream.mjs:ro
+    networks:
+      smartapi-edge:
+        aliases:
+          - router-fake
+    healthcheck:
+      test:
+        - "CMD"
+        - "node"
+        - "-e"
+        - "fetch('http://127.0.0.1:9000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+networks:
+  smartapi-edge:
+    external: true
+    name: smartapi-edge

@@ -3,7 +3,6 @@ package misc
 import (
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
@@ -12,13 +11,12 @@ import (
 // Separator used to visually group related log lines.
 var credentialSeparator = strings.Repeat("-", 67)
 
-// LogSavingCredentials emits a consistent log message when persisting auth material.
+// LogSavingCredentials records persistence without exposing credential identity or location.
 func LogSavingCredentials(path string) {
-	if path == "" {
+	if strings.TrimSpace(path) == "" {
 		return
 	}
-	// Use filepath.Clean so logs remain stable even if callers pass redundant separators.
-	fmt.Printf("Saving credentials to %s\n", filepath.Clean(path))
+	log.Debug("Saving credentials")
 }
 
 // LogCredentialSeparator adds a visual separator to group auth/key processing logs.
