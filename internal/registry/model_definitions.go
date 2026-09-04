@@ -7,6 +7,7 @@ import (
 )
 
 const (
+	codexAstraModelID               = "gpt-6-astra"
 	codexBuiltinImage15ModelID      = "gpt-image-1.5"
 	codexBuiltinImageModelID        = "gpt-image-2"
 	xaiBuiltinImageModelID          = "grok-imagine-image"
@@ -110,11 +111,29 @@ func GetXAIModels() []*ModelInfo {
 	return WithXAIBuiltins(cloneModelInfos(getModels().XAI))
 }
 
-// WithCodexBuiltins injects hard-coded Codex-only model definitions that should
-// not depend on remote models.json updates. Built-ins replace any matching IDs
-// already present in the provided slice.
+// WithCodexBuiltins injects hard-coded Codex model definitions that should not
+// depend on remote models.json updates.
 func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
-	return upsertModelInfos(models, codexBuiltinImage15ModelInfo(), codexBuiltinImageModelInfo())
+	return upsertModelInfos(models, codexAstraModelInfo(), codexBuiltinImage15ModelInfo(), codexBuiltinImageModelInfo())
+}
+
+func codexAstraModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:                        codexAstraModelID,
+		Object:                    "model",
+		Created:                   1788393600, // 2026-09-03
+		OwnedBy:                   "openai",
+		Type:                      "openai",
+		DisplayName:               "GPT-6 Astra",
+		Version:                   codexAstraModelID,
+		Description:               "OpenAI's model for complex reasoning, coding, research, and computer use.",
+		ContextLength:             1050000,
+		MaxCompletionTokens:       128000,
+		SupportedParameters:       []string{"tools"},
+		SupportedInputModalities:  []string{"text", "image"},
+		SupportedOutputModalities: []string{"text"},
+		Thinking:                  &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh", "max"}},
+	}
 }
 
 // WithXAIBuiltins injects hard-coded xAI image/video model definitions that should

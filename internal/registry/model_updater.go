@@ -299,6 +299,7 @@ func loadModelsFromBytes(data []byte, source string) error {
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		return fmt.Errorf("%s: decode models catalog: %w", source, err)
 	}
+	applyLocalModelOverrides(&parsed)
 	if err := validateModelsCatalog(&parsed); err != nil {
 		return fmt.Errorf("%s: validate models catalog: %w", source, err)
 	}
@@ -307,6 +308,18 @@ func loadModelsFromBytes(data []byte, source string) error {
 	modelsCatalogStore.data = &parsed
 	modelsCatalogStore.mu.Unlock()
 	return nil
+}
+
+func applyLocalModelOverrides(data *staticModelsJSON) {
+	if data == nil {
+		return
+	}
+	for _, model := range data.CodexPro {
+		if model != nil && model.ID == codexAstraModelID {
+			return
+		}
+	}
+	data.CodexPro = append(data.CodexPro, codexAstraModelInfo())
 }
 
 func getModels() *staticModelsJSON {

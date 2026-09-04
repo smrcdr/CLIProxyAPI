@@ -2,6 +2,49 @@ package registry
 
 import "testing"
 
+func TestGetCodexProModelsIncludesAstraMetadata(t *testing.T) {
+	var astra *ModelInfo
+	for _, model := range GetCodexProModels() {
+		if model != nil && model.ID == "gpt-6-astra" {
+			astra = model
+			break
+		}
+	}
+	if astra == nil {
+		t.Fatal("GetCodexProModels() does not include gpt-6-astra")
+	}
+	if astra.OwnedBy != "openai" || astra.Type != "openai" {
+		t.Fatalf("Astra ownership/type = %q/%q, want openai/openai", astra.OwnedBy, astra.Type)
+	}
+	if astra.ContextLength != 1050000 || astra.MaxCompletionTokens != 128000 {
+		t.Fatalf("Astra limits = %d/%d, want 1050000/128000", astra.ContextLength, astra.MaxCompletionTokens)
+	}
+	if !equalStrings(astra.SupportedInputModalities, []string{"text", "image"}) {
+		t.Fatalf("Astra input modalities = %#v, want text/image", astra.SupportedInputModalities)
+	}
+	if !equalStrings(astra.SupportedOutputModalities, []string{"text"}) {
+		t.Fatalf("Astra output modalities = %#v, want text", astra.SupportedOutputModalities)
+	}
+	if !equalStrings(astra.SupportedParameters, []string{"tools"}) {
+		t.Fatalf("Astra supported parameters = %#v, want tools", astra.SupportedParameters)
+	}
+	if astra.Thinking == nil || !equalStrings(astra.Thinking.Levels, []string{"low", "medium", "high", "xhigh", "max"}) {
+		t.Fatalf("Astra reasoning levels = %#v, want low/medium/high/xhigh/max", astra.Thinking)
+	}
+}
+
+func equalStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestModelOverrideHeadersFromEmbeddedModels(t *testing.T) {
 	const wantUA = "codex-tui/0.144.0 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.144.0)"
 	got := ModelOverrideHeaders("gpt-5.6-luna")
