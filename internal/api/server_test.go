@@ -238,6 +238,12 @@ func TestRouterManagementPageAvailableOnlyForRouterRuntime(t *testing.T) {
 	if !strings.Contains(rr.Body.String(), "SmartRouter") {
 		t.Fatalf("router page does not contain its title")
 	}
+	if !strings.Contains(rr.Body.String(), "function openModelGroupForm(") {
+		t.Fatalf("router page is missing the model-group form opener")
+	}
+	if !strings.Contains(rr.Body.String(), "function openRouteForm(") {
+		t.Fatalf("router page is missing the route form opener")
+	}
 
 	for _, role := range []proxyconfig.ServiceRole{proxyconfig.ServiceRoleCombined, proxyconfig.ServiceRolePool} {
 		roleCfg := *cfg

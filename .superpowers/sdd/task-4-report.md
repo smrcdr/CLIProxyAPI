@@ -29,3 +29,16 @@
 ## Review Self-review
 - Production changes remain limited to the embedded router asset; active drafts are never re-rendered during conflict recovery.
 - Failed recovery leaves stale/conflict flags and save controls blocked; only successful explicit reconciliation clears them.
+
+## Task 4 Regression Fix
+- Restored concrete `openModelGroupForm(groupId)` and `openRouteForm(groupId, routeId)` handlers in the embedded asset.
+- Create actions normalize the form ID to `null`; edit actions retain supplied IDs. Each handler closes the opposing editor state, preserves conflict gating, updates the model-groups view/hash, refreshes navigation, and calls `render()` so the selected form is visible.
+
+## Regression Verification
+- `go test ./internal/api -run 'TestRouterManagementPage' -count=1` — PASS.
+- `go test ./internal/api/handlers/management -run 'TestRouterManagement' -count=1` — PASS.
+- Embedded JavaScript `new Function` syntax check — PASS (`embedded JavaScript parsed successfully`).
+
+## Regression Self-review
+- Event delegation already dispatches `group-add`/`group-edit` and `route-add`/`route-edit` to these exact signatures; no delegation changes were needed.
+- Opening an editor does not clear `app.conflict` or conflict draft/recovery state; only the existing recovery/reconciliation paths may clear those flags.
