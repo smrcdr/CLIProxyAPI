@@ -1,6 +1,7 @@
 package management
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -83,6 +84,31 @@ func TestCodexFingerprintStableAndSecretScoped(t *testing.T) {
 	if len(got) != 24 {
 		t.Fatalf("fingerprint length = %d, want 24", len(got))
 	}
+}
+
+func TestCodexFingerprintSeparatesTeamMembersWithSharedAccountID(t *testing.T) {
+	handler := &Handler{codexFingerprintSecret: []byte("0123456789abcdef")}
+	teamAccountID := "shared-workspace-account"
+	first := handler.codexFingerprint(codexIdentityForCredential(
+		teamAccountID,
+		"team-a@example.com",
+		testCodexIDToken("user-team-a"),
+	))
+	second := handler.codexFingerprint(codexIdentityForCredential(
+		teamAccountID,
+		"team-b@example.com",
+		testCodexIDToken("user-team-b"),
+	))
+	if first == second {
+		t.Fatalf("Team members with shared account_id received the same fingerprint: %s", first)
+	}
+}
+
+func testCodexIDToken(userID string) string {
+	payload, _ := json.Marshal(map[string]any{
+		"https://api.openai.com/auth": map[string]string{"chatgpt_user_id": userID},
+	})
+	return "header." + base64.RawURLEncoding.EncodeToString(payload) + ".signature"
 }
 
 func TestParseCodexQuotaRejectsUnsupportedPayload(t *testing.T) {

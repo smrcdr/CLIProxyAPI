@@ -220,7 +220,7 @@ func (h *Handler) ImportCodexAccounts(c *gin.Context) {
 			result.Items = append(result.Items, item)
 			continue
 		}
-		identity := firstCodexIdentity(record.AccountID, record.Email)
+		identity := codexIdentityForCredential(record.AccountID, record.Email, record.IDToken)
 		item.Fingerprint = h.codexFingerprint(identity)
 		existing := h.findCodexAuthByFingerprint(item.Fingerprint)
 		created := existing == nil
@@ -503,12 +503,35 @@ func (h *Handler) codexFingerprint(identity string) string {
 }
 
 func (h *Handler) codexFingerprintForAuth(auth *coreauth.Auth) string {
-	fingerprint := h.codexFingerprint(firstCodexIdentity(
+	fingerprint := h.codexFingerprint(codexIdentityForCredential(
 		codexMetadataString(auth.Metadata, "account_id"),
 		codexMetadataString(auth.Metadata, "email"),
+		codexMetadataString(auth.Metadata, "id_token"),
 	))
 	codexaccount.Register(auth.ID, fingerprint)
 	return fingerprint
+}
+
+// codexIdentityForCredential keeps Team members separate when OpenAI gives them
+// the same workspace account_id. The user id is stable across token refreshes
+// and is available in the ID token's auth claims.
+func codexIdentityForCredential(accountID, email, idToken string) string {
+	accountID = strings.TrimSpace(accountID)
+	if userID := codexUserIDFromIDToken(idToken); accountID != "" && userID != "" {
+		return accountID + "|" + userID
+	}
+	return firstCodexIdentity(accountID, email)
+}
+
+func codexUserIDFromIDToken(idToken string) string {
+	claims, err := codexauth.ParseJWTToken(strings.TrimSpace(idToken))
+	if err != nil || claims == nil {
+		return ""
+	}
+	if userID := strings.TrimSpace(claims.CodexAuthInfo.ChatgptUserID); userID != "" {
+		return userID
+	}
+	return strings.TrimSpace(claims.CodexAuthInfo.UserID)
 }
 
 func firstCodexIdentity(values ...string) string {
